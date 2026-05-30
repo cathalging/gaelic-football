@@ -16,14 +16,22 @@ enum State { IDLE, MOVE_TO_BALL, CHASE }
 # Movement / carry.
 const WALK_SPEED    := 185.0   # normal running speed (humans & AI carriers)
 const CHASE_SPEED   := 245.0   # AI sprint when chasing a LOOSE ball (a race for it)
-const PRESS_SPEED   := 196.0   # AI speed when pressing an opponent CARRIER — only a
-							   # touch above WALK_SPEED so a carrier can make ground
+const PRESS_SPEED   := 174.0   # AI speed when pressing an opponent CARRIER — set just
+							   # BELOW carrier speed so a carrier running straight can
+							   # break away; defenders rely on angles, the solo dip and
+							   # the tackle to catch them, not raw pace
 const ACCEL         := 14.0
 const DECEL         := 10.0
 const PICK_RADIUS   := 42.0
 const PLAYER_RADIUS := 14.0
 const MAX_STEPS     := 4.0
 const STEP_DISTANCE := 150.0
+
+# Solo dip — a solo (toe-to-hand) is unlimited but momentarily checks your stride,
+# dropping you to a slow speed for a split second. A bounce/hop has no such cost
+# (but is once per possession), so running and hopping is the way to keep gliding.
+const SOLO_SLOW_DURATION := 0.20
+const SOLO_SLOW_SPEED    := 92.0
 
 # Pitch half-extents (must match match_scene / pitch). Used so AI carriers steer
 # away from the touchline instead of dribbling out of bounds.
@@ -196,6 +204,7 @@ var is_carrying := false
 var steps_taken := 0.0
 var has_bounced := false
 var _carry_timer := 0.0
+var _solo_slow  := 0.0   # >0 for the split-second stride check just after a solo
 
 # Carrier decision state.
 var _pass_cd      := 0.0           # >0 just after a pass (blocks rapid re-passing)
@@ -287,6 +296,7 @@ func _physics_process(delta: float) -> void:
 	_dash_cd         = maxf(0.0, _dash_cd - delta)
 	_dash_time       = maxf(0.0, _dash_time - delta)
 	_pass_cd         = maxf(0.0, _pass_cd - delta)
+	_solo_slow       = maxf(0.0, _solo_slow - delta)
 
 	# Stunned — frozen in place for a moment (after losing the ball or a missed
 	# tackle). No movement, no actions; a carried ball would already be gone.
@@ -422,8 +432,10 @@ func _run_state(delta: float) -> void:
 			if is_carrying:
 				_run_with_ball(delta)
 			else:
+				_maybe_ai_dash()
 				_move_toward(ball.global_position, _chase_speed(), delta)
 		State.CHASE:
+			_maybe_ai_dash()
 			_move_toward(ball.global_position, _chase_speed(), delta)
 
 
@@ -454,12 +466,50 @@ func _chase_speed() -> float:
 	return CHASE_SPEED
 
 
+## Carrier running speed — full pace normally, dropping to a crawl for the brief
+## window right after a solo (see _solo_slow). Used by both human and AI carriers.
+func _carry_speed() -> float:
+	return SOLO_SLOW_SPEED if _solo_slow > 0.0 else WALK_SPEED
+
+
+## Trigger a dash burst toward `dir` if one is available (off cooldown, enough
+## stamina, not mid-solo). Deterministic — no RNG — so the sim stays reproducible.
+## The burst itself is applied in _move_toward while _dash_time > 0.
+func _maybe_dash(dir: Vector2) -> void:
+	if _dash_cd > 0.0 or _dash_time > 0.0 or _solo_slow > 0.0:
+		return
+	if stamina < DASH_MIN_STAMINA or dir.length() < 0.01:
+		return
+	_dash_time = DASH_DURATION
+	_dash_cd   = DASH_COOLDOWN
+	_dash_dir  = dir.normalized()
+	stamina    = maxf(0.0, stamina - STAMINA_DASH_COST)
+
+
+## Off-ball dash decisions: explode onto a loose ball that's a short sprint away
+## (winning the race), or lunge to close the last gap on an enemy carrier so a
+## tackle can land despite the gentle press speed.
+func _maybe_ai_dash() -> void:
+	if ball == null:
+		return
+	if ball.ball_state == Ball.State.FREE:
+		var d := global_position.distance_to(ball.global_position)
+		if d >= 70.0 and d <= 340.0:
+			_maybe_dash(ball.global_position - global_position)
+	elif ball.ball_state == Ball.State.CARRIED and ball.carrier != null:
+		var c := ball.carrier as AIPlayer
+		if c.team != team:
+			var d := global_position.distance_to(c.global_position)
+			if d >= 30.0 and d <= 130.0:
+				_maybe_dash(c.global_position - global_position)
+
+
 func _run_with_ball(delta: float) -> void:
 	_carry_timer += delta
 
 	# Settle on the ball briefly before deciding anything.
 	if _carry_timer < DECISION_DELAY:
-		_move_toward(_carry_drive_target(), WALK_SPEED, delta)
+		_move_toward(_carry_drive_target(), _carry_speed(), delta)
 		return
 
 	var dist_goal := global_position.distance_to(_goal_centre)
@@ -486,12 +536,16 @@ func _run_with_ball(delta: float) -> void:
 			_ai_shoot(false)
 			return
 
-	# Simulate a solo to reset the step counter.
+	# Simulate a solo to reset the step counter (with the brief solo stride check).
 	if steps_taken > 2.5:
 		steps_taken = 0.0
+		_solo_slow  = SOLO_SLOW_DURATION
 		return
 
-	_move_toward(_carry_drive_target(), WALK_SPEED, delta)
+	# Burst away from a close presser when there's open ground ahead to run into.
+	if pressured:
+		_maybe_dash(_carry_drive_target() - global_position)
+	_move_toward(_carry_drive_target(), _carry_speed(), delta)
 
 
 ## Closest opponent distance — used to decide if the carrier is under pressure.
@@ -905,7 +959,11 @@ func _process_human_movement(delta: float) -> void:
 		facing   = _dash_dir
 		velocity = velocity.lerp(_dash_dir * DASH_SPEED, DASH_ACCEL * delta)
 	elif dir != Vector2.ZERO:
-		var spd := JOCKEY_SPEED if _jockeying else WALK_SPEED
+		var spd := WALK_SPEED
+		if is_carrying:
+			spd = _carry_speed()        # carriers dip for a moment after a solo
+		elif _jockeying:
+			spd = JOCKEY_SPEED
 		velocity = velocity.lerp(dir * spd, ACCEL * delta)
 		facing   = _contain_facing(dir)
 	else:
@@ -971,11 +1029,13 @@ func _process_human_actions(delta: float) -> void:
 	if not is_carrying and Input.is_action_just_pressed("shoot"):
 		_try_first_time_shot()
 
-	# SOLO — resets step counter (unlimited)
+	# SOLO — resets step counter (unlimited), but briefly checks your stride.
 	if Input.is_action_just_pressed("solo") and is_carrying:
 		steps_taken = 0.0
+		_solo_slow  = SOLO_SLOW_DURATION
 
-	# BOUNCE — resets step counter (once per possession)
+	# BOUNCE / hop — resets step counter (once per possession), no speed cost, so
+	# running and hopping keeps you gliding past a chaser.
 	if Input.is_action_just_pressed("bounce") and is_carrying and not has_bounced:
 		has_bounced = true
 		steps_taken = 0.0
@@ -1203,6 +1263,12 @@ func _force_drop() -> void:
 
 
 func _move_toward(target: Vector2, speed: float, delta: float) -> void:
+	# Mid-dash, an AI bursts straight along its locked dash direction (the human
+	# dash is driven separately in _process_human_movement).
+	if _dash_time > 0.0:
+		facing   = _dash_dir
+		velocity = velocity.lerp(_dash_dir * DASH_SPEED, DASH_ACCEL * delta)
+		return
 	var dir := target - global_position
 	if dir.length() < 10.0:
 		velocity = velocity.lerp(Vector2.ZERO, DECEL * delta)
