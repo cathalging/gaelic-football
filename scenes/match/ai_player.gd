@@ -64,6 +64,18 @@ const SEP_PUSH_MAX := 90.0    # cap on the separation steering offset
 const SHIFT_X_MAX  := 200.0   # how far the block slides toward the ball (x)
 const SHIFT_Y_MAX  := 110.0   # …and (y)
 
+# Man-marking & off-the-ball movement (Group A). Backs/mids track their man when
+# defending, which pulls them out of the goalmouth when a forward roams; forwards
+# push up off the ball when attacking, giving the carrier a runner to find.
+const MARK_GOALSIDE := 42.0   # how far goalside of his man a marker stands
+const RUN_SUPPORT   := 70.0   # how far forwards push toward goal off the ball
+const PASS_LEAD     := 46.0   # lead a forward run slightly toward goal on a pass
+const KICK_PASS_RANGE := 330.0 # passes longer than this are delivered as a kick pass
+# Sidestep — dashing while carrying beats a close defender: a lateral kink around
+# them plus a brief window where their tackle can't land.
+const SIDESTEP_IMMUNITY := 0.35
+const SIDESTEP_RANGE    := 60.0
+
 # AI decision timing
 const SHOOT_RANGE    := 200.0   # px from goal centre — comfortable goal range
 const DECISION_DELAY := 0.5     # seconds after pickup before pass/shoot decision
@@ -148,6 +160,11 @@ var jersey := 0
 ## makes saves instead of chasing upfield (see _run_keeper and the keeper save
 ## roll in match_scene). Set by match_scene before add_child so _ready sees it.
 var is_keeper := false
+
+## The opponent this player man-marks when defending (set by match_scene). Backs
+## and midfielders mark; forwards and the keeper leave this null and hold a zone,
+## so the attacking unit stays high to stretch the defence.
+var mark_target: AIPlayer = null
 
 ## 0..1 stamina reserve (see the stamina constants above).
 var stamina := 1.0
@@ -388,7 +405,7 @@ func _update_state() -> void:
 func _run_state(delta: float) -> void:
 	match state:
 		State.IDLE:
-			_move_toward(_tactical_position(), WALK_SPEED, delta)
+			_move_toward(_off_ball_target(), WALK_SPEED, delta)
 		State.MOVE_TO_BALL:
 			if is_carrying:
 				_run_with_ball(delta)
@@ -516,6 +533,61 @@ func _carry_drive_target() -> Vector2:
 
 # ── Team shape ───────────────────────────────────────────────────────────────
 
+## Off-the-ball destination: man-mark when defending, push up to support when our
+## team is attacking, otherwise hold the zonal block. This is what pulls defenders
+## out of the goalmouth (they follow their man) and gives the carrier a runner.
+func _off_ball_target() -> Vector2:
+	if _should_mark():
+		return _marking_position()
+	if _team_in_possession() == team and not is_keeper:
+		return _support_run_position()
+	return _tactical_position()
+
+
+## Which team currently holds the ball (carrier's team), or -1 if it's loose.
+func _team_in_possession() -> int:
+	if ball != null and ball.carrier != null:
+		return (ball.carrier as AIPlayer).team
+	return -1
+
+
+## True when this player's team is defending — an opponent has the ball, or it is
+## loose in our defensive half.
+func _is_defending() -> bool:
+	var poss := _team_in_possession()
+	if poss == team:
+		return false
+	if poss != -1:
+		return true
+	var own_goal_x := -_goal_centre.x
+	return ball != null and ball.global_position.x * own_goal_x > 0.0
+
+
+## Backs and midfielders man-mark when defending; forwards and the keeper don't.
+func _should_mark() -> bool:
+	return mark_target != null and not is_keeper and _is_defending()
+
+
+## Stand goalside of the marked man — between him and our goal — so he has to beat
+## us to get a clean shot or receive in space.
+func _marking_position() -> Vector2:
+	var own_goal := Vector2(-_goal_centre.x, 0.0)
+	var to_goal := (own_goal - mark_target.global_position)
+	if to_goal.length() > 0.01:
+		to_goal = to_goal.normalized()
+	return mark_target.global_position + to_goal * MARK_GOALSIDE + _separation()
+
+
+## A forward's supporting run: hold the zonal slot but push toward the opposition
+## goal so the defence has to come up with us, opening space behind.
+func _support_run_position() -> Vector2:
+	var base := _tactical_position()
+	var to_goal := _goal_centre - global_position
+	if to_goal.length() > GOAL_MOUTH_RANGE:
+		base += to_goal.normalized() * RUN_SUPPORT
+	return base
+
+
 func _tactical_position() -> Vector2:
 	# The whole team slides toward the ball as a single block, so each player
 	# keeps their formation lane relative to teammates instead of converging on
@@ -606,11 +678,23 @@ func _goal_lane_clear() -> bool:
 
 
 func _ai_pass_to(target: AIPlayer) -> void:
-	var dir := (target.global_position - global_position).normalized()
+	# Lead a forward making a run slightly toward goal, so the ball is played into
+	# space ahead of them rather than to their feet (a through ball).
+	var spot := target.global_position
+	if target.mark_target == null and not target.is_keeper:
+		var to_goal := _goal_centre - target.global_position
+		if to_goal.length() > GOAL_MOUTH_RANGE:
+			spot += to_goal.normalized() * PASS_LEAD
+	var dir := (spot - global_position).normalized()
 	is_carrying  = false
 	_carry_timer = 0.0
 	_pass_cd     = PASS_COOLDOWN
-	ball.release_hand_pass(dir)
+	# Hand pass when short; drive a kick pass for a longer through ball.
+	var dist := global_position.distance_to(spot)
+	if dist > KICK_PASS_RANGE:
+		ball.release_kick_pass(dir, clampf(dist / 700.0, 0.3, 1.0))
+	else:
+		ball.release_hand_pass(dir)
 
 
 ## Take a set-piece kick (free, 45, sideline, kickout). Called by match_scene
@@ -649,7 +733,11 @@ func _best_pass_target() -> AIPlayer:
 		var openness := _nearest_enemy_to(tm.global_position)
 		if openness < MARKED_RADIUS:
 			continue   # too tightly marked — the receiver gets tackled at once
-		var score := advance + openness * 0.4
+		# Reward forwards who have run closer to goal than the carrier — the through
+		# ball to a runner in behind, not the safe square pass.
+		var goal_gain := global_position.distance_to(_goal_centre) \
+				- tm.global_position.distance_to(_goal_centre)
+		var score := advance + openness * 0.4 + maxf(0.0, goal_gain) * 0.5
 		if score > best_score:
 			best_score = score
 			best       = tm
@@ -738,6 +826,8 @@ func _process_human_movement(delta: float) -> void:
 		_dash_cd   = DASH_COOLDOWN
 		_dash_dir  = dir.normalized() if dir != Vector2.ZERO else facing
 		stamina    = maxf(0.0, stamina - STAMINA_DASH_COST)
+		if is_carrying:
+			_apply_sidestep()   # a dash with the ball is a beat-your-man sidestep
 
 	# Jockey / contain — hold to shadow the carrier at a controlled (slower) speed
 	# without the ball, keeping square to them so the next tackle commits from the
@@ -755,6 +845,37 @@ func _process_human_movement(delta: float) -> void:
 		velocity = velocity.lerp(Vector2.ZERO, DECEL * delta)
 		if _jockeying:
 			facing = _contain_facing(facing)
+
+
+## Sidestep: a dash with the ball kinks the burst laterally around the nearest
+## defender ahead and grants a brief tackle-immunity window, so a well-timed dash
+## beats your man in a 1v1 instead of running straight into the tackle.
+func _apply_sidestep() -> void:
+	_tackle_immunity = maxf(_tackle_immunity, SIDESTEP_IMMUNITY)
+	var foe := _nearest_enemy_node()
+	if foe == null:
+		return
+	var to_foe := foe.global_position - global_position
+	if to_foe.length() > SIDESTEP_RANGE or to_foe.length() < 0.01:
+		return
+	to_foe = to_foe.normalized()
+	var lateral := Vector2(-to_foe.y, to_foe.x)   # perpendicular — step around him
+	if lateral.dot(_dash_dir) < 0.0:
+		lateral = -lateral
+	_dash_dir = (_dash_dir + lateral * 0.7).normalized()
+
+
+## The nearest opponent node (not just the distance) — used by the sidestep.
+func _nearest_enemy_node() -> AIPlayer:
+	var best: AIPlayer = null
+	var best_d := INF
+	for e in enemies:
+		var a := e as AIPlayer
+		var d := a.global_position.distance_to(global_position)
+		if d < best_d:
+			best_d = d
+			best   = a
+	return best
 
 
 ## While jockeying, face the carrier being contained (so a tackle comes in from

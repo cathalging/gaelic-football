@@ -173,6 +173,7 @@ func _ready() -> void:
 		(ai as AIPlayer).enemies = _team_b
 	for ai in _team_b:
 		(ai as AIPlayer).enemies = _team_a
+	_assign_marks()
 	# Referee signals — both teams can commit steps fouls. Illegal-tackle fouls are
 	# raised directly by the tackle resolution in this script (see _on_tackle_foul).
 	for ai in _team_a + _team_b:
@@ -267,6 +268,20 @@ func _spawn_team(team_id: int, positions: Array, roster: Array) -> void:
 		roster.append(ai)
 	for ai in roster:
 		(ai as AIPlayer).teammates = roster
+
+
+# ── Man-marking assignments ──────────────────────────────────────────────────────
+# Pair each team's backs and midfielders (roster indices 1..8) with the opposing
+# forward / midfielder they man-mark. Forwards (9..14) and the keeper (0) hold a
+# zone, so the attacking unit stays high and stretches the defence. Mirror map:
+# full backs↔full forwards, half backs↔half forwards, midfield↔midfield.
+const _MARK_MIRROR := {1: 12, 2: 13, 3: 14, 4: 9, 5: 10, 6: 11, 7: 7, 8: 8}
+
+func _assign_marks() -> void:
+	for i in _MARK_MIRROR:
+		var j: int = _MARK_MIRROR[i]
+		(_team_a[i] as AIPlayer).mark_target = _team_b[j] as AIPlayer
+		(_team_b[i] as AIPlayer).mark_target = _team_a[j] as AIPlayer
 
 
 # ── Player switching ───────────────────────────────────────────────────────────
