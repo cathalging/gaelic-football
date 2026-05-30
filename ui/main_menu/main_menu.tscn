@@ -1,0 +1,69 @@
+[gd_scene format=3 uid="uid://n5bv3ijqd7iu"]
+
+[ext_resource type="Script" uid="uid://dn5yvwfyou8gn" path="res://ui/main_menu/main_menu.gd" id="1_main"]
+
+[node name="MainMenu" type="Control" unique_id=2072896585]
+layout_mode = 3
+anchors_preset = 15
+anchor_right = 1.0
+anchor_bottom = 1.0
+grow_horizontal = 2
+grow_vertical = 2
+script = ExtResource("1_main")
+
+[node name="CenterContainer" type="CenterContainer" parent="." unique_id=1534824185]
+layout_mode = 1
+anchors_preset = 15
+anchor_right = 1.0
+anchor_bottom = 1.0
+grow_horizontal = 2
+grow_vertical = 2
+
+[node name="VBoxContainer" type="VBoxContainer" parent="CenterContainer" unique_id=1753964302]
+layout_mode = 2
+theme_override_constants/separation = 16
+
+[node name="Title" type="Label" parent="CenterContainer/VBoxContainer" unique_id=664192464]
+layout_mode = 2
+text = "GAELIC FOOTBALL"
+horizontal_alignment = 1
+
+[node name="Spacer" type="Control" parent="CenterContainer/VBoxContainer" unique_id=2046535165]
+custom_minimum_size = Vector2(0, 24)
+layout_mode = 2
+
+[node name="ManagerCareerButton" type="Button" parent="CenterContainer/VBoxContainer" unique_id=1995386496]
+unique_name_in_owner = true
+custom_minimum_size = Vector2(280, 48)
+layout_mode = 2
+text = "Manager Career"
+
+[node name="PlayerCareerButton" type="Button" parent="CenterContainer/VBoxContainer" unique_id=1113587828]
+unique_name_in_owner = true
+custom_minimum_size = Vector2(280, 48)
+layout_mode = 2
+text = "Player Career"
+
+[node name="QuickPlayButton" type="Button" parent="CenterContainer/VBoxContainer" unique_id=1908128388]
+unique_name_in_owner = true
+custom_minimum_size = Vector2(280, 48)
+layout_mode = 2
+text = "Quick Play"
+
+[node name="SettingsButton" type="Button" parent="CenterContainer/VBoxContainer" unique_id=1948358689]
+unique_name_in_owner = true
+custom_minimum_size = Vector2(280, 48)
+layout_mode = 2
+text = "Settings"
+
+[node name="QuitButton" type="Button" parent="CenterContainer/VBoxContainer" unique_id=1081242286]
+unique_name_in_owner = true
+custom_minimum_size = Vector2(280, 48)
+layout_mode = 2
+text = "Quit"
+
+[connection signal="pressed" from="CenterContainer/VBoxContainer/ManagerCareerButton" to="." method="_on_manager_career_pressed"]
+[connection signal="pressed" from="CenterContainer/VBoxContainer/PlayerCareerButton" to="." method="_on_player_career_pressed"]
+[connection signal="pressed" from="CenterContainer/VBoxContainer/QuickPlayButton" to="." method="_on_quick_play_pressed"]
+[connection signal="pressed" from="CenterContainer/VBoxContainer/SettingsButton" to="." method="_on_settings_pressed"]
+[connection signal="pressed" from="CenterContainer/VBoxContainer/QuitButton" to="." method="_on_quit_pressed"]

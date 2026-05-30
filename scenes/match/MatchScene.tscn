@@ -1,0 +1,149 @@
+[gd_scene load_steps=7 format=3]
+
+[ext_resource type="Script" path="res://scenes/match/match_scene.gd" id="1_root"]
+[ext_resource type="Script" path="res://scenes/match/pitch.gd"       id="2_pitch"]
+[ext_resource type="Script" path="res://scenes/match/ball.gd"         id="3_ball"]
+[ext_resource type="Script" path="res://scenes/match/crowd.gd"        id="4_crowd"]
+[ext_resource type="Script" path="res://scenes/match/hud.gd"          id="5_hud"]
+[ext_resource type="Script" path="res://scenes/match/crowd_audio.gd"  id="6_audio"]
+
+[sub_resource type="CircleShape2D" id="CircleShape2D_ball"]
+radius = 10.0
+
+; ── Root ──────────────────────────────────────────────────────────────────────
+[node name="MatchScene" type="Node2D"]
+script = ExtResource("1_root")
+
+; ── Crowd ─────────────────────────────────────────────────────────────────────
+; Drawn around the pitch; sets z_index = -1 itself so it sits behind everything.
+[node name="Crowd" type="Node2D" parent="."]
+script = ExtResource("4_crowd")
+
+; ── Pitch ─────────────────────────────────────────────────────────────────────
+[node name="Pitch" type="Node2D" parent="."]
+script = ExtResource("2_pitch")
+
+; ── Crowd audio (placeholder event hub) ─────────────────────────────────────────
+[node name="CrowdAudio" type="Node" parent="."]
+script = ExtResource("6_audio")
+
+; ── Ball ──────────────────────────────────────────────────────────────────────
+; Starts at pitch centre. Camera2D is a child so it auto-follows.
+[node name="Ball" type="CharacterBody2D" parent="."]
+motion_mode = 1
+z_index = 5
+script = ExtResource("3_ball")
+
+[node name="CollisionShape2D" type="CollisionShape2D" parent="Ball"]
+shape = SubResource("CircleShape2D_ball")
+
+[node name="Camera2D" type="Camera2D" parent="Ball"]
+zoom = Vector2(2.0, 2.0)
+position_smoothing_enabled = true
+position_smoothing_speed = 6.0
+limit_left = -980
+limit_right = 980
+limit_top = -640
+limit_bottom = 640
+
+; ── HUD ───────────────────────────────────────────────────────────────────────
+[node name="HUD" type="CanvasLayer" parent="."]
+script = ExtResource("5_hud")
+
+; Full-screen Control so children can anchor to screen edges.
+[node name="UIRoot" type="Control" parent="HUD"]
+layout_mode = 3
+anchors_preset = 15
+anchor_right = 1.0
+anchor_bottom = 1.0
+grow_horizontal = 2
+grow_vertical = 2
+mouse_filter = 2
+
+; Score box — centred at top.
+[node name="ScoreBox" type="HBoxContainer" parent="HUD/UIRoot"]
+layout_mode = 1
+anchor_left = 0.5
+anchor_right = 0.5
+anchor_top = 0.0
+anchor_bottom = 0.0
+offset_left = -210.0
+offset_right = 210.0
+offset_top = 12.0
+offset_bottom = 52.0
+alignment = 1
+theme_override_constants/separation = 10
+mouse_filter = 2
+
+[node name="HomeName" type="Label" parent="HUD/UIRoot/ScoreBox"]
+layout_mode = 2
+text = "HOME"
+horizontal_alignment = 1
+vertical_alignment = 1
+theme_override_colors/font_color = Color(0.4, 0.62, 1, 1)
+theme_override_font_sizes/font_size = 20
+
+[node name="HomeLabel" type="Label" parent="HUD/UIRoot/ScoreBox"]
+unique_name_in_owner = true
+layout_mode = 2
+text = "0-00"
+horizontal_alignment = 1
+vertical_alignment = 1
+theme_override_font_sizes/font_size = 28
+
+[node name="Sep" type="Label" parent="HUD/UIRoot/ScoreBox"]
+layout_mode = 2
+text = " — "
+horizontal_alignment = 1
+vertical_alignment = 1
+theme_override_font_sizes/font_size = 28
+
+[node name="AwayLabel" type="Label" parent="HUD/UIRoot/ScoreBox"]
+unique_name_in_owner = true
+layout_mode = 2
+text = "0-00"
+horizontal_alignment = 1
+vertical_alignment = 1
+theme_override_font_sizes/font_size = 28
+
+[node name="AwayName" type="Label" parent="HUD/UIRoot/ScoreBox"]
+layout_mode = 2
+text = "AWAY"
+horizontal_alignment = 1
+vertical_alignment = 1
+theme_override_colors/font_color = Color(1, 0.42, 0.42, 1)
+theme_override_font_sizes/font_size = 20
+
+; Power bar — centred at bottom, hidden until a button is held.
+[node name="PowerBar" type="ProgressBar" parent="HUD/UIRoot"]
+unique_name_in_owner = true
+layout_mode = 1
+anchor_left = 0.5
+anchor_right = 0.5
+anchor_top = 1.0
+anchor_bottom = 1.0
+offset_left = -160.0
+offset_right = 160.0
+offset_top = -54.0
+offset_bottom = -26.0
+max_value = 100.0
+show_percentage = false
+visible = false
+
+; Event flash label — centred in the middle of the screen.
+[node name="EventLabel" type="Label" parent="HUD/UIRoot"]
+unique_name_in_owner = true
+layout_mode = 1
+anchor_left = 0.5
+anchor_right = 0.5
+anchor_top = 0.5
+anchor_bottom = 0.5
+offset_left = -220.0
+offset_right = 220.0
+offset_top = -30.0
+offset_bottom = 30.0
+text = ""
+horizontal_alignment = 1
+vertical_alignment = 1
+theme_override_font_sizes/font_size = 36
+visible = false

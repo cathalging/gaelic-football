@@ -1,0 +1,13 @@
+# Godot 4 — editor & export artefacts
+.godot/
+/android/
+/build/
+*.translation
+export_presets.cfg
+
+# OS / editor noise
+.DS_Store
+*.tmp
+
+# Claude Code — personal/local settings
+.claude/settings.local.json

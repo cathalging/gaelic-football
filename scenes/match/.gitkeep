@@ -1,0 +1,3 @@
+# The playable 2D match scene lives here (match.tscn + match.gd).
+# Presentation only — it asks MatchEngine for logic and reports its result
+# back via MatchEngine.match_finished. No simulation maths in this folder.
