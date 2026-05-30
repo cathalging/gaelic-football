@@ -34,6 +34,10 @@ var height          := 0.0
 var vertical_speed  := 0.0
 const GRAVITY       := 560.0  # px / s² (gentler = longer hang time so shots carry over the line)
 
+## Steady lateral push (px/s²) applied to a ball in flight, set once per match by
+## match_scene. Long kicks drift with it; short hand passes barely feel it.
+var wind := Vector2.ZERO
+
 # Visuals
 const RADIUS  := 11.0
 const C_SEAM  := Color(0.55, 0.34, 0.14)
@@ -60,6 +64,7 @@ func _physics_process(delta: float) -> void:
 				global_position = carrier.global_position
 			velocity = Vector2.ZERO
 		State.FLYING:
+			velocity += wind * delta   # the ball drifts on the breeze while airborne
 			move_and_slide()
 			vertical_speed -= GRAVITY * delta
 			height += vertical_speed * delta

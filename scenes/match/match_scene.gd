@@ -57,6 +57,24 @@ var _pending_kickout_team := 1
 # Per-player score tally for the full-time top-scorers panel: AIPlayer → Vector2i(goals, points).
 var _scorers: Dictionary = {}
 
+# ── Advantage rule (Group C) ─────────────────────────────────────────────────────
+# After a foul, play is allowed to continue for a window. If the fouled team keeps
+# the ball they play on; if they lose it the free is pulled back to the foul spot.
+const ADVANTAGE_TIME := 2.5
+var _adv_active := false
+var _adv_timer  := 0.0
+var _adv_team   := -1
+var _adv_pos    := Vector2.ZERO
+var _adv_label  := ""
+
+# ── The mark (Group C) ──────────────────────────────────────────────────────────
+# A clean catch from a kickout that travels beyond the 45 m line wins a free (mark).
+var _kickout_pending := false   # a kickout has been taken; the first gather resolves it
+var _kickout_team    := 0       # the team that kicked it out
+
+# ── Wind (Group C) ──────────────────────────────────────────────────────────────
+const WIND_MAX := 64.0   # px/s² lateral push at full strength; set once per match
+
 # ── Tackling ──────────────────────────────────────────────────────────────────--
 # A defender presses `tackle` near a carrier. The human plays a quick timing
 # minigame (a cursor sweeps a bar; strike in the centre); the AI rolls a seeded
@@ -190,9 +208,21 @@ func _ready() -> void:
 	_controlled.is_human_controlled = true
 	_controlled.is_selected         = true
 
+	_setup_wind()
+
 	_hud.update_score(0, 0, 0, 0)
 	_hud.set_clock("H1  00:00")
 	_hud.setup_minimap(_team_a, _team_b, _ball, HALF_LENGTH, HALF_WIDTH)
+
+
+## Pick a steady match wind from the seeded RNG and tell the ball about it. Drawn
+## once at kick-off so it's deterministic for the match.
+func _setup_wind() -> void:
+	var angle := _rng.randf_range(0.0, TAU)
+	var strength := _rng.randf_range(0.4, 1.0) * WIND_MAX
+	_ball.wind = Vector2.RIGHT.rotated(angle) * strength
+	var dir_label := "→" if _ball.wind.x >= 0.0 else "←"
+	_hud.show_event("Wind %s" % dir_label, 2.0)
 
 
 func _unhandled_input(event: InputEvent) -> void:
@@ -228,6 +258,8 @@ func _physics_process(delta: float) -> void:
 	_check_shot_block(delta)
 	_check_keeper_save()
 	_check_scoring()
+	_check_mark()
+	_tick_advantage(delta)
 	_check_out_of_bounds()
 	_update_power_bar()
 	_update_hud_indicators()
@@ -884,10 +916,10 @@ func _update_power_bar() -> void:
 
 # ── Events ─────────────────────────────────────────────────────────────────────
 
-## Steps violation — free kick to the opposition at the spot.
+## Steps violation — free kick to the opposition at the spot (play advantage first).
 func _on_foul(pos: Vector2, team: int) -> void:
 	_hud.show_event("Steps!", 1.5)
-	_award_free(_other_team(team), pos)
+	_begin_advantage(_other_team(team), pos, "Free kick")
 
 
 ## Illegal tackle — penalty if it happened in the large square the fouled team
@@ -902,10 +934,64 @@ func _on_tackle_foul(fouled_team: int, pos: Vector2) -> void:
 		_add_shake(FOUL_SHAKE)
 		_award_penalty(fouled_team)
 	else:
-		# A clumsy illegal challenge — yellow card and a free.
+		# A clumsy illegal challenge — yellow card and a free (advantage permitting).
 		_hud.show_card(false)
 		_hud.show_event("Free — illegal tackle", 1.5)
-		_award_free(fouled_team, pos)
+		_begin_advantage(fouled_team, pos, "Free — illegal tackle")
+
+
+# ── Advantage rule ───────────────────────────────────────────────────────────--
+
+## Start playing advantage for `team` after a foul: remember the pending free, then
+## let play run for ADVANTAGE_TIME. _tick_advantage decides whether to wave it on or
+## pull it back. A goal-denying foul in the square goes straight to a penalty and
+## never reaches here.
+func _begin_advantage(team: int, pos: Vector2, label: String) -> void:
+	_adv_active = true
+	_adv_timer  = ADVANTAGE_TIME
+	_adv_team   = team
+	_adv_pos    = pos
+	_adv_label  = label
+	_hud.show_event("Advantage", 1.0)
+
+
+func _tick_advantage(delta: float) -> void:
+	if not _adv_active:
+		return
+	_adv_timer -= delta
+	var carrier := _current_carrier()
+	# Opposition won the ball back → no advantage came of it, pull it back now.
+	if carrier != null and carrier.team != _adv_team:
+		_finish_advantage(true)
+		return
+	if _adv_timer <= 0.0:
+		# Window up: if the fouled team has possession, play on; else award the free.
+		_finish_advantage(carrier == null or carrier.team != _adv_team)
+
+
+func _finish_advantage(award: bool) -> void:
+	_adv_active = false
+	if award:
+		_award_free(_adv_team, _adv_pos)
+
+
+# ── The mark ──────────────────────────────────────────────────────────────────--
+
+## Resolve a mark: the first player to gather a kickout. If it's the kicking team
+## catching beyond the 45 m line, award them a free (mark); otherwise just play on.
+func _check_mark() -> void:
+	if not _kickout_pending:
+		return
+	if _ball.ball_state != Ball.State.CARRIED or _ball.carrier == null:
+		return
+	var catcher := _ball.carrier as AIPlayer
+	_kickout_pending = false
+	if catcher.team != _kickout_team or catcher.is_keeper:
+		return   # opposition broke it up, or the keeper kept it short — no mark
+	if absf(catcher.global_position.x) <= FORTY_FIVE_X + 40.0:
+		# Caught out around midfield, beyond the 45 — that's a mark.
+		_hud.show_event("Mark!", 1.5)
+		_award_free(catcher.team, catcher.global_position)
 
 
 # ── Referee awards ───────────────────────────────────────────────────────────--
@@ -935,6 +1021,10 @@ func _award_kickout(team: int) -> void:
 	var roster: Array = _team_a if team == 0 else _team_b
 	var keeper := roster[0] as AIPlayer
 	_award_set_piece("Kickout", keeper.home_position, keeper)
+	# Arm the mark: the first clean catch beyond the 45 wins a free. Set after the
+	# set-piece call, which clears any previous pending mark.
+	_kickout_pending = true
+	_kickout_team    = team
 
 
 func _award_square_ball(defending_team: int) -> void:
@@ -956,6 +1046,9 @@ func _award_square_ball(defending_team: int) -> void:
 func _award_set_piece(label: String, spot: Vector2, taker: AIPlayer) -> void:
 	if _contest_active:
 		_end_human_contest()   # a whistle ends any in-progress tackle contest
+	# Any whistle ends a running advantage and clears a pending mark.
+	_adv_active      = false
+	_kickout_pending = false
 	_play_state   = Play.SET_PIECE
 	_sp_timer     = 0.0
 	_sp_countdown = SET_PIECE_COUNTDOWN

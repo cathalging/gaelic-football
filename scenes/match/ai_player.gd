@@ -103,6 +103,7 @@ const STUCK_WINDOW     := 0.6     # window over which carry progress is measured
 const STUCK_DISTANCE   := 26.0    # less ground than this made in the window = stuck
 const PASS_LANE_RADIUS := 36.0    # an opponent this close to the pass line cuts it out
 const MARKED_RADIUS    := 56.0    # a receiver with an opponent this close is too marked
+const KICKOUT_SHORT_RANGE := 360.0 # keeper plays it short to an open man inside this
 
 # Jockey / contain — a defender (without the ball) holds `jockey` to shadow the
 # carrier at a controlled, slower speed, staying square to them to line up a clean
@@ -732,6 +733,9 @@ func _ai_pass_to(target: AIPlayer) -> void:
 ## for an AI taker once the opposition has stood back. Shoots if in range,
 ## otherwise finds a forward pass, else drives the ball downfield.
 func take_set_piece() -> void:
+	if is_keeper:
+		_take_kickout()
+		return
 	if global_position.distance_to(_goal_centre) < SHOOT_RANGE:
 		_ai_shoot(true)
 		return
@@ -742,6 +746,38 @@ func take_set_piece() -> void:
 	is_carrying  = false
 	_carry_timer = 0.0
 	ball.release_kick(_attack_dir, 0.7, false)
+
+
+## Keeper kickout strategy: play it short to an open defender when one is available
+## (keeps possession), otherwise drive it long into the midfield contest.
+func _take_kickout() -> void:
+	var short_target := _open_short_kickout_target()
+	if short_target != null:
+		_ai_pass_to(short_target)
+		return
+	is_carrying  = false
+	_carry_timer = 0.0
+	ball.release_kick(_attack_dir, 0.95, false)   # long, contestable
+
+
+## The most open teammate within short-kickout range (a corner/half back to restart
+## possession with), or null if everyone short is marked — then we go long.
+func _open_short_kickout_target() -> AIPlayer:
+	var best: AIPlayer = null
+	var best_open := MARKED_RADIUS * 1.4   # must be clearly open to risk a short one
+	for t in teammates:
+		var tm := t as AIPlayer
+		if tm == self or tm.is_keeper:
+			continue
+		if global_position.distance_to(tm.global_position) > KICKOUT_SHORT_RANGE:
+			continue
+		if _pass_lane_blocked(global_position, tm.global_position):
+			continue
+		var open := _nearest_enemy_to(tm.global_position)
+		if open > best_open:
+			best_open = open
+			best      = tm
+	return best
 
 
 ## Pick a teammate to pass to. Only considers options whose passing lane is clear
