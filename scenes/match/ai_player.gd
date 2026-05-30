@@ -115,6 +115,12 @@ const TAP_THRESHOLD    := 0.20  # seconds — tap vs hold for pass and shoot
 const SHOOT_DOUBLE_TAP := 0.28  # window to register a 2nd shoot tap (goal attempt)
 const SHOOT_MAX_HOLD   := 1.2   # hold time that maps to full power
 
+# Shooting skill (Group B). A shot drifts more the harder it is — long range and
+# tight marking spray it wide — so picking the right moment to shoot is the skill.
+const MAX_SHOT_SPREAD  := 0.13   # radians of aim error on the hardest shot
+const FIST_RANGE       := 150.0  # within this, a hand pass at goal is a fisted finish
+const FIRST_TIME_RANGE := 62.0   # strike a loose / incoming ball first-time within this
+
 # Visual
 const C_DOT       := Color(1.0, 1.0, 1.0)
 const C_MARKER    := Color(1.0, 0.88, 0.1)   # yellow selection triangle
@@ -230,6 +236,10 @@ var _attack_dir:  Vector2
 var _c_body:      Color
 var _c_outline:   Color
 
+# Per-player shot RNG, seeded from team+jersey so shot spread is deterministic and
+# reproducible rather than using global randf() (see CLAUDE.md determinism rules).
+var _shot_rng := RandomNumberGenerator.new()
+
 
 func _ready() -> void:
 	if team == 0:
@@ -248,6 +258,7 @@ func _ready() -> void:
 		facing       = Vector2.LEFT
 	if is_keeper:
 		_c_body = C_KEEPER_BODY   # clashing kit so the keeper reads at a glance
+	_shot_rng.seed = hash(Vector2i(team, jersey))
 
 
 func _physics_process(delta: float) -> void:
@@ -625,11 +636,31 @@ func _ai_shoot(go_for_goal: bool) -> void:
 	var dir := (aim - global_position).normalized()
 	is_carrying  = false
 	_carry_timer = 0.0
-	ball.shooter = self
 	var power := 0.85
 	if not go_for_goal:
 		power = clampf(global_position.distance_to(_goal_centre) / POINT_RANGE, 0.45, 1.0)
-	ball.release_kick(dir, power, go_for_goal)
+	_shoot_ball(dir, power, go_for_goal)
+
+
+## Release a shot in `dir`, applying an accuracy spread that grows with shot
+## difficulty (range + pressure). Shared by AI and human shots and first-time
+## strikes so accuracy is modelled in exactly one place.
+func _shoot_ball(dir: Vector2, power: float, is_goal: bool) -> void:
+	ball.shooter         = self
+	ball.last_touch_team = team
+	var spread := _shot_spread()
+	var aimed := dir.rotated(_shot_rng.randf_range(-spread, spread))
+	ball.release_kick(aimed.normalized(), power, is_goal)
+
+
+## Aim error (radians) for the current shot: farther from goal and tighter marking
+## both spray it wider, so a good shot is a well-chosen one.
+func _shot_spread() -> float:
+	var dist := global_position.distance_to(_goal_centre)
+	var range_factor := clampf(dist / POINT_RANGE, 0.0, 1.0)
+	var pressure := 1.0 - clampf(_nearest_enemy_distance() / PRESSURE_RADIUS, 0.0, 1.0)
+	var difficulty := clampf(range_factor * 0.7 + pressure * 0.5, 0.0, 1.0)
+	return difficulty * MAX_SHOT_SPREAD
 
 
 ## The opposing goalkeeper, if any — used to place goal shots away from them.
@@ -899,6 +930,11 @@ func _process_human_actions(delta: float) -> void:
 	# second press = goal attempt, charging power while held.
 	_process_shoot(delta)
 
+	# First-time strike — pressing shoot with no ball but one right beside you
+	# volleys it goalward rather than gathering it first.
+	if not is_carrying and Input.is_action_just_pressed("shoot"):
+		_try_first_time_shot()
+
 	# SOLO — resets step counter (unlimited)
 	if Input.is_action_just_pressed("solo") and is_carrying:
 		steps_taken = 0.0
@@ -911,6 +947,13 @@ func _process_human_actions(delta: float) -> void:
 
 func _human_hand_pass() -> void:
 	is_carrying = false
+	# Fisted finish: a hand pass taken in close and aimed at goal is a punch at the
+	# net — it can score a goal (low and stoppable, like a shot) instead of a pass.
+	var to_goal := _goal_centre - global_position
+	if to_goal.length() < FIST_RANGE and to_goal.length() > 0.01 \
+			and aim_dir.dot(to_goal.normalized()) > 0.6:
+		_shoot_ball(aim_dir, 0.5, true)
+		return
 	ball.release_hand_pass(aim_dir)
 
 
@@ -921,8 +964,23 @@ func _human_kick_pass(power: float) -> void:
 
 func _human_shoot(power: float, is_goal: bool) -> void:
 	is_carrying = false
-	ball.shooter = self
-	ball.release_kick(aim_dir, power, is_goal)
+	_shoot_ball(aim_dir, power, is_goal)
+
+
+## First-time strike: press shoot without the ball while a loose or incoming ball
+## is right beside you, and you volley it goalward first time instead of gathering.
+## A quick point attempt — fast, but the spread model makes it a real gamble.
+func _try_first_time_shot() -> void:
+	if is_carrying or ball == null:
+		return
+	if ball.ball_state == Ball.State.CARRIED:
+		return
+	if global_position.distance_to(ball.global_position) > FIRST_TIME_RANGE:
+		return
+	var to_goal := _goal_centre - global_position
+	var dir := aim_dir if aim_dir.length() > 0.01 else to_goal.normalized()
+	ball.carrier = null
+	_shoot_ball(dir, 0.85, false)
 
 
 ## Passing gesture machine (phases): 0 idle, 1 first press held, 2 first tap
