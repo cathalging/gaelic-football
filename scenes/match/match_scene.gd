@@ -80,7 +80,10 @@ const WIND_MAX := 64.0   # px/s² lateral push at full strength; set once per ma
 # minigame (a cursor sweeps a bar; strike in the centre); the AI rolls a seeded
 # outcome. Perfect = clean steal, slightly off = ball knocked loose, miss =
 # tackler stunned + long cooldown. A tackle from behind is always a foul.
-const TACKLE_REACH        := 48.0   # px from carrier needed to start a tackle
+const TACKLE_REACH        := 64.0   # px from carrier needed to start a tackle. Kept a
+									# little above AIPlayer.TACKLE_ENGAGE_RADIUS so that
+									# once the engagement ring is full you are always in
+									# range to actually strike the tackle.
 const CONTEST_DURATION    := 2.0    # seconds before an un-struck contest is a miss
 const CONTEST_LEASH       := 84.0   # carrier breaks away if it gets this far off
 const CONTEST_SWEEP_SPEED := 1.7    # cursor sweeps across the bar (cycles/sec, ping-pong)
@@ -419,6 +422,7 @@ func _set_controlled(target: AIPlayer) -> void:
 	_controlled.cancel_windup()
 	target.is_human_controlled = true
 	target.is_selected         = true
+	target.refill_dash()   # dash recovers in the background — ready on takeover
 	_controlled = target
 
 

@@ -90,8 +90,9 @@ func pick_up(new_carrier: Node2D) -> void:
 
 # Hand pass — short, flat punch. Distance scales with the hold (power 0..1): a
 # quick tap is a short pass to a nearby player; a full hold reaches the old fixed
-# range. Min is low so close passes don't fly straight past the receiver.
-const HAND_PASS_MIN := 210.0
+# range. Min is kept low so a close hand pass drops to a nearby team-mate instead
+# of flying straight past the receiver.
+const HAND_PASS_MIN := 120.0
 const HAND_PASS_MAX := 560.0
 
 ## Hand pass — punched along `direction`; distance scaled by `power` (0..1).
@@ -104,13 +105,13 @@ func release_hand_pass(direction: Vector2, power: float = 1.0) -> void:
 	is_goal_attempt = false
 
 
-## Kicked pass — flatter and shorter than a shot, but with more range than a hand
-## pass. power 0..1 from the hold time.
+## Kicked pass — flatter than a shot, but with far more range than a hand pass: a
+## full-power kick pass is a long, raking ball downfield. power 0..1 from the hold.
 func release_kick_pass(direction: Vector2, power: float) -> void:
 	carrier        = null
 	ball_state     = State.FLYING
 	is_goal_attempt = false
-	velocity       = direction * lerpf(440.0, 700.0, power)
+	velocity       = direction * lerpf(440.0, 900.0, power)
 	vertical_speed = lerpf(120.0, 200.0, power)
 	height         = 5.0
 

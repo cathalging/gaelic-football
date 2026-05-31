@@ -254,10 +254,10 @@ Map*. Gameplay must reference these names, never raw keys/buttons.
 | `move_*`    | WASD             | Left stick + D-pad             |                                            |
 | `pass`      | Left click       | A button                       | Tap = hand pass; double-tap+hold = kick pass (power from hold) |
 | `shoot`     | Right click      | B button                       | Hold = point attempt; double-tap+hold 2nd = goal attempt (power from hold) |
-| `sprint`    | Shift            | Right trigger                  | Dash burst (ball carrier only), then a cooldown |
+| `sprint`    | Shift            | Right trigger                  | Dash burst (any player), then a cooldown. The cooldown is per-player and recovers in the background regardless of who you're controlling; it starts full and is topped up when you take control of a player, so a switched-to player's dash is always ready. Availability shown by the ring around the controlled player |
 | `solo`      | C                | X button                       | Resets carry step counter (unlimited)      |
 | `bounce`    | V                | Y button                       | Resets carry step counter (once/possession)|
-| `tackle`    | F                | Right bumper                   | Near a carrier: starts the timing-contest tackle |
+| `tackle`    | F                | Right bumper                   | Must first shadow the carrier within a close radius for a moment to engage — a ring around the controlled defender fills as you close, then goes solid when a tackle can land — pressing then starts the timing-contest tackle. Does not gate charging down a shot from the front (a separate front-on block) |
 | `jockey`    | E (hold)         | Left trigger (hold)            | Defender only: shadow the carrier at a contain speed, staying square to set up a tackle |
 | `switch_player` | Q            | Button 9                       | On defence: take the player nearest the ball |
 | `pause`     | Esc              | Start                          |                                            |

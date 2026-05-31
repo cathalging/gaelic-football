@@ -58,7 +58,19 @@ const DASH_MIN_STAMINA    := 0.20   # can't start a dash below this reserve
 # Tackling — a defender must press `tackle` near a carrier to start a timing
 # contest (resolved in match_scene). These tune reach, recovery and the stun
 # applied on each outcome.
-const TACKLE_REACH     := 46.0   # px: how close a defender must be to start a tackle
+# Engagement dwell — before a tackle can be started, the defender must first close
+# to within TACKLE_ENGAGE_RADIUS of the carrier and *stay* there for
+# TACKLE_ENGAGE_TIME. This stops "touch-and-steal": you have to get alongside and
+# harry your man before you can challenge. It gates only the tackle (can_tackle) —
+# charging down a shot from the front is a separate front-on block (see
+# match_scene._check_shot_block) and is unaffected.
+#
+# The charge radius is kept a touch *below* match_scene.TACKLE_REACH (the distance
+# at which a tackle can actually be struck), so a full ring always means you are in
+# range to tackle — never "bar full but the tackle is refused". Keep this invariant
+# (TACKLE_ENGAGE_RADIUS < match_scene.TACKLE_REACH) if you retune either value.
+const TACKLE_ENGAGE_RADIUS := 54.0   # px the defender must be within to build engagement
+const TACKLE_ENGAGE_TIME   := 0.45   # seconds of close pressure needed before a tackle
 const TACKLE_IMMUNITY  := 0.7    # seconds a fresh carrier cannot be tackled
 const TACKLE_COOLDOWN  := 1.6    # seconds before a defender can tackle again
 const TACKLE_CD_MISS   := 2.2    # longer cooldown after a mistimed (failed) tackle
@@ -138,6 +150,10 @@ const C_DASH_RDY  := Color(0.30, 1.00, 0.55, 0.95)  # dash ready ring
 const C_DASH_CD   := Color(0.45, 0.45, 0.50, 0.55)  # dash cooling ring (track)
 const C_DASH_FILL := Color(0.30, 0.80, 1.00, 0.90)  # dash cooldown progress arc
 const C_STUN      := Color(1.0, 0.85, 0.2, 0.95)    # stun indicator
+const C_ENGAGE_TRK := Color(0.55, 0.50, 0.45, 0.45) # tackle engagement track
+const C_ENGAGE_FIL := Color(1.00, 0.55, 0.10, 0.95) # tackle engagement filling
+const C_ENGAGE_RDY := Color(1.00, 0.20, 0.20, 0.98) # engaged — tackle ready (press F)
+const C_ENGAGE_CD  := Color(0.55, 0.30, 0.28, 0.55) # post-tackle recovery (can't yet)
 
 # ── Configuration (set by match_scene before add_child) ──────────────────────
 
@@ -218,6 +234,7 @@ var _jockeying := false
 var _stun_timer      := 0.0  # >0 while stunned (can't move, act, pick up or tackle)
 var _tackle_cd       := 0.0  # >0 while this player can't start another tackle
 var _tackle_immunity := 0.0  # >0 while this carrier can't be tackled
+var _engage_time     := 0.0  # seconds spent within engage radius of the enemy carrier
 
 # Wind-up for human pass / shoot
 var _pass_held_t  := 0.0
@@ -322,9 +339,26 @@ func _physics_process(delta: float) -> void:
 		_process_pickup()
 		if is_carrying:
 			_process_carry(delta)
+	_update_tackle_engagement(delta)
 	_update_stamina(delta)
 	move_and_slide()
 	queue_redraw()
+
+
+## Build up "engagement" while shadowing the enemy carrier: the timer climbs only
+## while within TACKLE_ENGAGE_RADIUS of them and resets the moment they break away
+## (or we win the ball). A defender can only start a tackle once it has reached
+## TACKLE_ENGAGE_TIME — see can_tackle. Both the human and AI tackle paths share it.
+func _update_tackle_engagement(delta: float) -> void:
+	if is_carrying:
+		_engage_time = 0.0
+		return
+	var carrier := _current_enemy_carrier()
+	if carrier != null \
+			and global_position.distance_to(carrier.global_position) <= TACKLE_ENGAGE_RADIUS:
+		_engage_time += delta
+	else:
+		_engage_time = 0.0
 
 
 ## Spend stamina while sprinting near full speed, recover it while taking it easy.
@@ -344,9 +378,12 @@ func _update_stamina(delta: float) -> void:
 # the human, a seeded roll for AI). These methods just apply the agreed outcome
 # so both paths share one implementation.
 
-## True if this defender may start a tackle right now.
+## True if this defender may start a tackle right now: not carrying, not stunned,
+## off cooldown, and having spent enough time pressing the carrier up close (see
+## _update_tackle_engagement). The proximity dwell is what stops instant steals.
 func can_tackle() -> bool:
-	return not is_carrying and _stun_timer <= 0.0 and _tackle_cd <= 0.0
+	return not is_carrying and _stun_timer <= 0.0 and _tackle_cd <= 0.0 \
+			and _engage_time >= TACKLE_ENGAGE_TIME
 
 
 ## True when a defender meets the carrier from the front or side. A tackle from
@@ -367,6 +404,14 @@ func apply_stun(t: float) -> void:
 
 func begin_tackle_cooldown(t: float) -> void:
 	_tackle_cd = t
+
+
+## Top the dash back up (no cooldown, no active burst). Called when a player comes
+## under human control so a switched-to player always has their dash ready — the
+## dash recovers in the background regardless of who you were controlling.
+func refill_dash() -> void:
+	_dash_cd   = 0.0
+	_dash_time = 0.0
 
 
 ## Outcome: clean steal. The victim loses the ball and is stunned; this defender
@@ -1213,6 +1258,7 @@ func reset_for_restart(pos: Vector2) -> void:
 	_stun_timer      = 0.0
 	_tackle_cd       = 0.0
 	_tackle_immunity = 0.0
+	_engage_time     = 0.0
 	_dash_time       = 0.0
 	_dash_cd         = 0.0
 	_pass_cd         = 0.0
@@ -1302,8 +1348,13 @@ func _draw() -> void:
 		_draw_dash_ring()   # dash is available to any controlled player (trial)
 		if is_carrying:
 			_draw_step_dots()
-		elif _jockeying:
-			_draw_jockey()
+		else:
+			if _jockeying:
+				_draw_jockey()
+			# Tackle engagement — show the dwell filling while pressing a carrier, and
+			# a solid ring the instant a tackle can be committed (see can_tackle).
+			if _engage_time > 0.0 or _tackle_cd > 0.0:
+				_draw_engage_ring()
 
 
 ## Ring around the human carrier showing dash availability: solid green when
@@ -1317,6 +1368,24 @@ func _draw_dash_ring() -> void:
 		draw_arc(Vector2.ZERO, r, start, start + TAU * frac, 32, C_DASH_FILL, 2.5, true)
 	else:
 		draw_arc(Vector2.ZERO, r, 0.0, TAU, 32, C_DASH_RDY, 2.5, true)
+
+
+## Ring (just outside the dash ring) showing tackle readiness while defending:
+##  • recovering from a tackle → a dim red ring (can't challenge yet);
+##  • building engagement      → an orange arc filling toward a full ring;
+##  • engaged & ready          → a solid red ring (a tackle will land — press F).
+func _draw_engage_ring() -> void:
+	var r := PLAYER_RADIUS + 10.0
+	if _tackle_cd > 0.0:
+		draw_arc(Vector2.ZERO, r, 0.0, TAU, 32, C_ENGAGE_CD, 2.0, true)
+		return
+	if _engage_time >= TACKLE_ENGAGE_TIME:
+		draw_arc(Vector2.ZERO, r, 0.0, TAU, 32, C_ENGAGE_RDY, 2.5, true)
+	else:
+		draw_arc(Vector2.ZERO, r, 0.0, TAU, 32, C_ENGAGE_TRK, 1.5, true)
+		var frac  := clampf(_engage_time / TACKLE_ENGAGE_TIME, 0.0, 1.0)
+		var start := -PI * 0.5
+		draw_arc(Vector2.ZERO, r, start, start + TAU * frac, 32, C_ENGAGE_FIL, 2.5, true)
 
 
 func _draw_stun() -> void:
