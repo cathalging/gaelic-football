@@ -34,6 +34,12 @@ var height          := 0.0
 var vertical_speed  := 0.0
 const GRAVITY       := 560.0  # px / s² (gentler = longer hang time so shots carry over the line)
 
+## Arc height (px) of the crossbar. A shot crossing the goal line ABOVE this is a
+## point (over the bar); AT or BELOW it is a goal (driven in under the bar).
+## match_scene reads this to score, and _draw rings the ball once it clears this
+## height so "over the bar" reads at a glance.
+const CROSSBAR_HEIGHT := 30.0
+
 ## Steady lateral push (px/s²) applied to a ball in flight, set once per match by
 ## match_scene. Long kicks drift with it; short hand passes barely feel it.
 var wind := Vector2.ZERO
@@ -42,6 +48,7 @@ var wind := Vector2.ZERO
 const RADIUS  := 11.0
 const C_SEAM  := Color(0.55, 0.34, 0.14)
 const C_INNER := Color(0.98, 0.93, 0.76)
+const C_OVER_BAR := Color(1.0, 0.85, 0.25, 0.9)  # halo when the ball is over crossbar height
 
 
 func _physics_process(delta: float) -> void:
@@ -103,6 +110,7 @@ func release_hand_pass(direction: Vector2, power: float = 1.0) -> void:
 	height       = 6.0
 	vertical_speed = 40.0   # tiny loft so it reads as airborne
 	is_goal_attempt = false
+	shooter      = null     # a pass is not a shot — it can't register a score
 
 
 ## Kicked pass — flatter than a shot, but with far more range than a hand pass: a
@@ -111,6 +119,7 @@ func release_kick_pass(direction: Vector2, power: float) -> void:
 	carrier        = null
 	ball_state     = State.FLYING
 	is_goal_attempt = false
+	shooter        = null   # a pass is not a shot — it can't register a score
 	velocity       = direction * lerpf(440.0, 900.0, power)
 	vertical_speed = lerpf(120.0, 200.0, power)
 	height         = 5.0
@@ -149,3 +158,8 @@ func _draw() -> void:
 	var c := Vector2(0.0, lift)
 	draw_circle(c, RADIUS * scale,         C_SEAM)
 	draw_circle(c, (RADIUS - 1.8) * scale, C_INNER)
+
+	# Over the crossbar — ring the ball so "this is a point, sailing over the bar"
+	# reads instantly (and a driven goal attempt staying under the bar does not).
+	if height > CROSSBAR_HEIGHT:
+		draw_arc(c, RADIUS * scale + 4.0, 0.0, TAU, 24, C_OVER_BAR, 2.0)

@@ -11,6 +11,7 @@ extends Node2D
 const HALF_LENGTH   := 900.0     # must match pitch.gd
 const HALF_WIDTH    := 560.0     # must match pitch.gd
 const GOAL_HW       := 58.0      # must match pitch.gd (widened so low shots can score)
+const SCORE_MARGIN  := 8.0       # px of leeway outside the posts that still counts a score
 const HALF_DURATION := 30.0 * 60.0  # 30 game-minutes in game-seconds
 
 # ── Referee geometry (px from the relevant goal/end line; ~13 px/m) ─────────────
@@ -21,7 +22,10 @@ const LARGE_SQ_HW    := 124.0
 const FORTY_FIVE_X   := 315.0    # |x| of the 45 m line (900 − 585; see pitch.gd)
 const PENALTY_DIST   := 143.0    # penalty spot, 11 m out from goal
 const SET_PIECE_RETREAT := 170.0 # opposition must stand 13 m back from the ball
-const SET_PIECE_COUNTDOWN := 3.0 # ball placed, then a 3-second countdown before play resumes
+# A player taking a set piece / kickout has no countdown — they take it in their
+# own time. An AI taker instead waits this long before kicking, so the human gets
+# a beat to read the restart and react rather than being caught by an instant kick.
+const AI_SET_PIECE_DELAY := 1.5  # seconds an AI taker waits before kicking
 
 # ── Play / set-piece state ──────────────────────────────────────────────────────
 # LIVE      — open play.
@@ -115,8 +119,9 @@ var _contest_timer    := 0.0
 var _contest_defender: AIPlayer = null
 var _contest_victim:   AIPlayer = null
 
-## 1.0 = real-time 30-minute halves.  60.0 = 1 real-second per game-minute (testing).
-const CLOCK_SPEED   := 60.0
+## Game-minutes elapsed per real second. 1.0 = real-time 30-minute halves;
+## higher = faster. 8.0 → ~3m45s real per half (~7.5-minute match plus breaks).
+const CLOCK_SPEED   := 8.0
 
 var _home_goals  := 0
 var _home_points := 0
@@ -691,6 +696,11 @@ const KEEPER_SAVE_MIN     := 0.08   # floor save chance (perfectly placed corner
 
 var _save_rolled := false   # at most one save attempt per shot
 
+# Previous-frame ball state, for a swept goal-line test so a score is registered
+# even on the frame a fast (or just-landing) shot crosses the line.
+var _prev_ball_pos    := Vector2.ZERO
+var _prev_ball_height := 0.0
+
 func _check_keeper_save() -> void:
 	if _ball.ball_state != Ball.State.FLYING or not _ball.is_goal_attempt:
 		_save_rolled = false
@@ -728,29 +738,57 @@ func _check_keeper_save() -> void:
 
 # ── Scoring ────────────────────────────────────────────────────────────────────
 
+## Register a score by sweeping the ball's path against each goal line. Using the
+## crossing point (not the post-line position) keeps points that drift on the wind
+## or land right at the line from being lost. Over the crossbar = point; driven in
+## under it = goal. Only a struck shot can score — a pass that drifts over cannot.
 func _check_scoring() -> void:
-	if _ball.ball_state != Ball.State.FLYING:
+	var cur := _ball.global_position
+	var prev := _prev_ball_pos
+	var prev_h := _prev_ball_height
+	_prev_ball_pos    = cur
+	_prev_ball_height = _ball.height
+
+	if _ball.shooter == null:
+		return   # not a shot — passes and clearances can't score
+	# A ball merely rolling on the ground can't score; allow it while airborne or on
+	# the very frame it touches down at the line (prev frame still had height).
+	if _ball.ball_state != Ball.State.FLYING and prev_h <= 0.0:
 		return
-	var bx := _ball.global_position.x
-	var by := _ball.global_position.y
-	if abs(by) >= GOAL_HW:
-		return  # outside posts
-	if bx < -HALF_LENGTH:
-		# Away (team 1) attacks the left goal.
-		if _square_ball(1):
-			_award_square_ball(0)
-		else:
-			_score_for_away()
-	elif bx > HALF_LENGTH:
-		# Home (team 0) attacks the right goal.
-		if _square_ball(0):
-			_award_square_ball(1)
-		else:
-			_score_for_home()
+
+	# Which goal line, if any, did the path cross this frame?
+	var goal_sign := 0.0
+	if prev.x < HALF_LENGTH and cur.x >= HALF_LENGTH:
+		goal_sign = 1.0
+	elif prev.x > -HALF_LENGTH and cur.x <= -HALF_LENGTH:
+		goal_sign = -1.0
+	else:
+		return
+
+	var line_x := goal_sign * HALF_LENGTH
+	var denom := cur.x - prev.x
+	var t := clampf((line_x - prev.x) / denom, 0.0, 1.0) if absf(denom) > 0.001 else 1.0
+	var cross_y := lerpf(prev.y, cur.y, t)
+	if absf(cross_y) > GOAL_HW + SCORE_MARGIN:
+		return   # wide — _check_out_of_bounds will award the kickout / 45
+
+	var attacking := 0 if goal_sign > 0.0 else 1
+	var defending := _other_team(attacking)
+	# Over the bar (or a lofted point) = point; driven in under the bar = goal.
+	var cross_h := lerpf(prev_h, _ball.height, t)
+	var is_goal := cross_h <= Ball.CROSSBAR_HEIGHT
+	# Square ball only disallows a goal (an attacker fouling the small square).
+	if is_goal and _square_ball(attacking):
+		_award_square_ball(defending)
+		return
+	if attacking == 0:
+		_score_for_home(is_goal)
+	else:
+		_score_for_away(is_goal)
 
 
-func _score_for_home() -> void:
-	if _ball.is_goal_attempt:
+func _score_for_home(is_goal: bool) -> void:
+	if is_goal:
 		_home_goals += 1
 		_credit_scorer(_ball.shooter, true)
 		_hud.update_score(_home_goals, _home_points, _away_goals, _away_points)
@@ -766,8 +804,8 @@ func _score_for_home() -> void:
 		_award_kickout(1)
 
 
-func _score_for_away() -> void:
-	if _ball.is_goal_attempt:
+func _score_for_away(is_goal: bool) -> void:
+	if is_goal:
 		_away_goals += 1
 		_credit_scorer(_ball.shooter, true)
 		_hud.update_score(_home_goals, _home_points, _away_goals, _away_points)
@@ -861,6 +899,8 @@ func _reset_to_centre() -> void:
 	_ball.vertical_speed  = 0.0
 	_ball.last_touch_team = -1
 	_ball.shooter         = null
+	_prev_ball_pos        = Vector2.ZERO
+	_prev_ball_height     = 0.0
 
 
 # ── Match clock ────────────────────────────────────────────────────────────────
@@ -1042,10 +1082,11 @@ func _award_square_ball(defending_team: int) -> void:
 # ── Set-piece framework ─────────────────────────────────────────────────────--
 
 ## Stop play, place the ball with `taker`, freeze everyone, and force the
-## opposition to stand back. A SET_PIECE_COUNTDOWN runs before anyone may act;
-## once it ends play is armed and the taker holds the ball until they kick it:
-##  • human's team → hand control to the taker (they can aim & kick but not move);
-##  • opposition   → an AI takes the kick the moment the countdown ends.
+## opposition to stand back. The taker then holds the ball until they kick it:
+##  • human's team → control is handed over and the kick is armed immediately, so
+##    there is no enforced wait — aim & kick in your own time;
+##  • opposition   → the AI waits AI_SET_PIECE_DELAY (so you get a beat to react),
+##    then takes the kick.
 ## Play resumes (everyone unfreezes) the moment the taker releases the ball.
 func _award_set_piece(label: String, spot: Vector2, taker: AIPlayer) -> void:
 	if _contest_active:
@@ -1055,7 +1096,8 @@ func _award_set_piece(label: String, spot: Vector2, taker: AIPlayer) -> void:
 	_kickout_pending = false
 	_play_state   = Play.SET_PIECE
 	_sp_timer     = 0.0
-	_sp_countdown = SET_PIECE_COUNTDOWN
+	# No countdown for a human taker; the AI waits a beat before kicking.
+	_sp_countdown = 0.0 if taker.team == 0 else AI_SET_PIECE_DELAY
 	_sp_taker     = taker
 	_sp_label     = label
 
@@ -1080,8 +1122,12 @@ func _award_set_piece(label: String, spot: Vector2, taker: AIPlayer) -> void:
 	_separate_from_taker(taker)
 
 	if taker.team == 0:
+		# Player's own restart — hand them control and arm it immediately so there
+		# is no enforced wait before they can aim and kick.
 		_set_set_piece_controller(taker)
-	_hud.set_status("%s — %d" % [label, int(SET_PIECE_COUNTDOWN)])
+		_arm_set_piece()
+	else:
+		_hud.set_status("%s — %d" % [label, int(ceil(AI_SET_PIECE_DELAY))])
 	_hud.hide_power()
 
 
@@ -1193,6 +1239,10 @@ func _give_ball_to(taker: AIPlayer, spot: Vector2) -> void:
 	taker._tackle_immunity = AIPlayer.TACKLE_IMMUNITY
 	_ball.global_position  = spot
 	_ball.pick_up(taker)
+	# Re-anchor the swept-score tracker on the placed ball so the restart can't read
+	# as a goal-line crossing.
+	_prev_ball_pos    = spot
+	_prev_ball_height = 0.0
 
 
 # ── Referee geometry helpers ────────────────────────────────────────────────--

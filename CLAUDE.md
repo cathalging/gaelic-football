@@ -253,7 +253,7 @@ Map*. Gameplay must reference these names, never raw keys/buttons.
 |-------------|------------------|--------------------------------|--------------------------------------------|
 | `move_*`    | WASD             | Left stick + D-pad             |                                            |
 | `pass`      | Left click       | A button                       | Tap = hand pass; double-tap+hold = kick pass (power from hold) |
-| `shoot`     | Right click      | B button                       | Hold = point attempt; double-tap+hold 2nd = goal attempt (power from hold) |
+| `shoot`     | Right click      | B button                       | Hold = point attempt; double-tap+hold 2nd = goal attempt (power from hold). Power bar fills fast with a sweet spot (green marker on the HUD bar); overcharging — holding to the very top — sprays the shot, so release a touch early for accuracy. Score type is decided by the ball's actual arc height where it crosses the goal line (over the crossbar = point, under = goal), not by the attempt intent |
 | `sprint`    | Shift            | Right trigger                  | Dash burst (any player), then a cooldown. The cooldown is per-player and recovers in the background regardless of who you're controlling; it starts full and is topped up when you take control of a player, so a switched-to player's dash is always ready. Availability shown by the ring around the controlled player |
 | `solo`      | C                | X button                       | Resets carry step counter (unlimited)      |
 | `bounce`    | V                | Y button                       | Resets carry step counter (once/possession)|
@@ -265,6 +265,34 @@ Map*. Gameplay must reference these names, never raw keys/buttons.
 | menu nav    | Arrows / WASD    | Left stick / D-pad (`ui_*`)    |                                            |
 | menu accept | Enter / Space    | A button (`ui_accept`)         |                                            |
 | menu back   | Esc              | B button (`ui_cancel`)         |                                            |
+
+---
+
+## Match feel & timing
+
+The playable match (`scenes/match/`) is tuned for a few key feels. The relevant
+tunables, with their home file:
+
+- **Match length.** The clock counts a fixed game-minute span; the real:game
+  ratio is `CLOCK_SPEED` in `match_scene.gd` (lower = longer real matches). Do
+  not shorten the game clock to change match length — slow the ratio instead.
+- **Scoring is accurate and slightly generous.** `_check_scoring()` sweeps the
+  ball path between frames (interpolating where it crosses the goal line) so fast
+  or just-landed shots can't slip through, with `SCORE_MARGIN` px of leeway
+  outside the posts. Point vs goal is the interpolated arc height at the crossing
+  vs `Ball.CROSSBAR_HEIGHT`. Passes never score (the ball's `shooter` is cleared
+  on release).
+- **Shooting is a skill with a sweet spot.** Power-bar fill speed is
+  `SHOOT_MAX_HOLD` in `ai_player.gd`; `OVERCHARGE_KNEE`/`OVERCHARGE_SPREAD` add
+  spray when held past the sweet spot. `MAX_SHOT_SPREAD` is the base difficulty
+  spread.
+- **Carry steps.** `STEP_DISTANCE` in `ai_player.gd` controls how fast the carry
+  step counter fills (lower = fills faster, forcing a solo/bounce sooner).
+- **Set pieces & kickouts.** No countdown for a human taker — the set piece arms
+  immediately. The AI waits `AI_SET_PIECE_DELAY` (`match_scene.gd`) before kicking
+  so the player gets a beat to react.
+- **Visual reads.** The crossbar is drawn in a warm colour (`pitch.gd`); the ball
+  gains a ring when it's above crossbar height (`ball.gd`).
 
 ---
 

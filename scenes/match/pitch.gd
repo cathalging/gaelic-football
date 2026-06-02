@@ -31,6 +31,7 @@ const C_STRIPE   := Color(0.141, 0.451, 0.173)
 const C_LINE     := Color(1.0, 1.0, 1.0, 0.92)
 const C_NET      := Color(0.9, 0.9, 0.85, 0.35)
 const C_POST     := Color(1.0, 1.0, 1.0)
+const C_CROSSBAR := Color(1.0, 0.82, 0.25, 0.95)  # warm bar — matches the ball's over-bar ring
 
 
 func _draw() -> void:
@@ -115,8 +116,9 @@ func _draw_goals(end_x: float, facing: float) -> void:
 	draw_line(back_top, back_bot, C_LINE, LINE_W)
 	draw_line(back_bot, bot,      C_LINE, LINE_W)
 
-	# Crossbar (goal mouth, slightly thicker)
-	draw_line(top, bot, C_LINE, LINE_W * 2.0)
+	# Crossbar (goal mouth) — drawn in a warm colour that matches the ball's over-bar
+	# ring, so "ball over the bar between these posts = point" reads at a glance.
+	draw_line(top, bot, C_CROSSBAR, LINE_W * 2.5)
 
 	# Posts — drawn last so they sit on top of all lines
 	draw_circle(top, POST_R, C_POST)

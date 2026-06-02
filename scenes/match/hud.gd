@@ -46,6 +46,7 @@ var _tackle_cursor:  ColorRect = null
 func _ready() -> void:
 	_power_bar.visible   = false
 	_event_label.visible = false
+	_setup_power_marker()
 	update_score(0, 0, 0, 0)
 	_setup_clock_label()
 	_setup_status_label()
@@ -171,6 +172,23 @@ func update_score(home_g: int, home_p: int, away_g: int, away_p: int) -> void:
 func set_clock(text: String) -> void:
 	if _clock_label:
 		_clock_label.text = text
+
+
+## Mark the shot sweet spot on the power bar: release at or just before this line
+## for the most accurate shot; holding past it (overcharging) sprays it. Kept in
+## sync with the shot model via AIPlayer.OVERCHARGE_KNEE so there's one source.
+func _setup_power_marker() -> void:
+	var marker := ColorRect.new()
+	marker.color         = Color(0.20, 0.95, 0.45, 0.95)
+	marker.layout_mode   = 1   # LAYOUT_MODE_ANCHORS
+	marker.anchor_left   = AIPlayer.OVERCHARGE_KNEE
+	marker.anchor_right  = AIPlayer.OVERCHARGE_KNEE
+	marker.anchor_top    = 0.0
+	marker.anchor_bottom = 1.0
+	marker.offset_left   = -2.0
+	marker.offset_right  =  2.0
+	marker.mouse_filter  = Control.MOUSE_FILTER_IGNORE
+	_power_bar.add_child(marker)
 
 
 ## Show the power bar filled 0..1. Called every frame while a button is held.

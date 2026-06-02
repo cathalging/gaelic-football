@@ -25,7 +25,7 @@ const DECEL         := 10.0
 const PICK_RADIUS   := 42.0
 const PLAYER_RADIUS := 14.0
 const MAX_STEPS     := 4.0
-const STEP_DISTANCE := 150.0
+const STEP_DISTANCE := 125.0   # px of carry per "step" — lower = counter fills faster
 
 # Solo dip — a solo (toe-to-hand) is unlimited but momentarily checks your stride,
 # dropping you to a slow speed for a split second. A bounce/hop has no such cost
@@ -134,11 +134,15 @@ const C_JOCKEY     := Color(0.30, 0.80, 1.00, 0.85)  # contain arc
 # Human input timing
 const TAP_THRESHOLD    := 0.20  # seconds — tap vs hold for pass and shoot
 const SHOOT_DOUBLE_TAP := 0.28  # window to register a 2nd shoot tap (goal attempt)
-const SHOOT_MAX_HOLD   := 1.2   # hold time that maps to full power
+const SHOOT_MAX_HOLD   := 0.8   # hold time that maps to full power — short, so the bar fills fast
 
 # Shooting skill (Group B). A shot drifts more the harder it is — long range and
 # tight marking spray it wide — so picking the right moment to shoot is the skill.
 const MAX_SHOT_SPREAD  := 0.13   # radians of aim error on the hardest shot
+# Overcharge — holding the shot bar to the very top sprays it. There's a sweet spot
+# just below full power, so you can't mash to max every time; release a touch early.
+const OVERCHARGE_KNEE   := 0.82  # power above which accuracy starts to fall away
+const OVERCHARGE_SPREAD := 0.12  # extra radians of aim error at full (overcharged) power
 const FIST_RANGE       := 150.0  # within this, a hand pass at goal is a fisted finish
 const FIRST_TIME_RANGE := 62.0   # strike a loose / incoming ball first-time within this
 
@@ -748,19 +752,21 @@ func _ai_shoot(go_for_goal: bool) -> void:
 func _shoot_ball(dir: Vector2, power: float, is_goal: bool) -> void:
 	ball.shooter         = self
 	ball.last_touch_team = team
-	var spread := _shot_spread()
+	var spread := _shot_spread(power)
 	var aimed := dir.rotated(_shot_rng.randf_range(-spread, spread))
 	ball.release_kick(aimed.normalized(), power, is_goal)
 
 
 ## Aim error (radians) for the current shot: farther from goal and tighter marking
-## both spray it wider, so a good shot is a well-chosen one.
-func _shot_spread() -> float:
+## both spray it wider, so a good shot is a well-chosen one. Overcharging the power
+## bar (releasing right at the top) adds spread on top, so there's a sweet spot.
+func _shot_spread(power: float) -> float:
 	var dist := global_position.distance_to(_goal_centre)
 	var range_factor := clampf(dist / POINT_RANGE, 0.0, 1.0)
 	var pressure := 1.0 - clampf(_nearest_enemy_distance() / PRESSURE_RADIUS, 0.0, 1.0)
 	var difficulty := clampf(range_factor * 0.7 + pressure * 0.5, 0.0, 1.0)
-	return difficulty * MAX_SHOT_SPREAD
+	var overcharge := clampf((power - OVERCHARGE_KNEE) / (1.0 - OVERCHARGE_KNEE), 0.0, 1.0)
+	return difficulty * MAX_SHOT_SPREAD + overcharge * OVERCHARGE_SPREAD
 
 
 ## The opposing goalkeeper, if any — used to place goal shots away from them.
