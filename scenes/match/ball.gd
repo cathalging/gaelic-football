@@ -143,23 +143,29 @@ func release_kick(direction: Vector2, power: float, is_goal: bool) -> void:
 
 
 func _draw() -> void:
-	# Top-down height illusion. The SHADOW is always drawn at the ball's true
-	# ground position (Vector2.ZERO = its real world coords), so the shadow is the
-	# honest read of where the ball is relative to the posts — that's what scoring
-	# uses. The ball SPRITE lifts slightly and, more importantly, GROWS with height
-	# so "in the air / over the bar" is obvious at a glance.
-	var lift  := -height * 0.30                       # modest screen-up offset
-	var scale := clampf(1.0 + height / 90.0, 1.0, 2.4)  # grows the higher it goes
+	# 2.5D height illusion in the broadcast view (see PitchProjection). The SHADOW
+	# sits on the projected ground at the ball's true world position — the honest
+	# read of where it is relative to the posts (what scoring uses). The ball SPRITE
+	# lifts along the same height→screen mapping the goalposts use, so a lofted point
+	# visibly clears the crossbar, and it GROWS with height so "up in the air" reads
+	# at a glance.
+	var gp   := global_position
+	var s    := PitchProjection.scale_at(gp.y)
+	var base := PitchProjection.ground(gp) - gp   # node origin → projected ground
 
-	# Ground shadow at the true position — shrinks as the ball climbs.
-	var s := clampf(1.0 - height / 240.0, 0.35, 1.0)
-	draw_circle(Vector2.ZERO, RADIUS * s, Color(0.0, 0.0, 0.0, 0.30))
+	# Ground shadow — a flattened ellipse that shrinks as the ball climbs.
+	var shrink := clampf(1.0 - height / 240.0, 0.35, 1.0)
+	draw_set_transform(base, 0.0, Vector2(s, s * 0.5))
+	draw_circle(Vector2.ZERO, RADIUS * shrink, Color(0.0, 0.0, 0.0, 0.30))
 
-	var c := Vector2(0.0, lift)
-	draw_circle(c, RADIUS * scale,         C_SEAM)
-	draw_circle(c, (RADIUS - 1.8) * scale, C_INNER)
+	# Ball sprite — lifted by its arc height and grown as it rises.
+	var lift_px := PitchProjection.lift(gp.y, height)
+	var grow    := clampf(1.0 + height / 90.0, 1.0, 2.4)
+	draw_set_transform(base + Vector2(0.0, -lift_px), 0.0, Vector2(s * grow, s * grow))
+	draw_circle(Vector2.ZERO, RADIUS,       C_SEAM)
+	draw_circle(Vector2.ZERO, RADIUS - 1.8, C_INNER)
 
 	# Over the crossbar — ring the ball so "this is a point, sailing over the bar"
 	# reads instantly (and a driven goal attempt staying under the bar does not).
 	if height > CROSSBAR_HEIGHT:
-		draw_arc(c, RADIUS * scale + 4.0, 0.0, TAU, 24, C_OVER_BAR, 2.0)
+		draw_arc(Vector2.ZERO, RADIUS + 4.0, 0.0, TAU, 24, C_OVER_BAR, 2.0)

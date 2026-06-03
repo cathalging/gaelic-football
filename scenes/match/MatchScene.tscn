@@ -12,6 +12,7 @@ radius = 10.0
 
 ; ── Root ──────────────────────────────────────────────────────────────────────
 [node name="MatchScene" type="Node2D"]
+y_sort_enabled = true
 script = ExtResource("1_root")
 
 ; ── Crowd ─────────────────────────────────────────────────────────────────────
@@ -21,6 +22,7 @@ script = ExtResource("4_crowd")
 
 ; ── Pitch ─────────────────────────────────────────────────────────────────────
 [node name="Pitch" type="Node2D" parent="."]
+z_index = -1
 script = ExtResource("2_pitch")
 
 ; ── Crowd audio (placeholder event hub) ─────────────────────────────────────────
@@ -28,7 +30,7 @@ script = ExtResource("2_pitch")
 script = ExtResource("6_audio")
 
 ; ── Ball ──────────────────────────────────────────────────────────────────────
-; Starts at pitch centre. Camera2D is a child so it auto-follows.
+; Starts at pitch centre. The camera is no longer a child — see BroadcastCamera below.
 [node name="Ball" type="CharacterBody2D" parent="."]
 motion_mode = 1
 z_index = 5
@@ -37,14 +39,11 @@ script = ExtResource("3_ball")
 [node name="CollisionShape2D" type="CollisionShape2D" parent="Ball"]
 shape = SubResource("CircleShape2D_ball")
 
-[node name="Camera2D" type="Camera2D" parent="Ball"]
-zoom = Vector2(2.0, 2.0)
-position_smoothing_enabled = true
-position_smoothing_speed = 6.0
-limit_left = -980
-limit_right = 980
-limit_top = -640
-limit_bottom = 640
+; ── Broadcast camera ──────────────────────────────────────────────────────────
+; A free camera (no longer parented to the ball) driven by match_scene as a TV-style
+; pan: it mostly turns to follow play left↔right with a loose, smoothed follow.
+[node name="BroadcastCamera" type="Camera2D" parent="."]
+zoom = Vector2(1.85, 1.85)
 
 ; ── HUD ───────────────────────────────────────────────────────────────────────
 [node name="HUD" type="CanvasLayer" parent="."]

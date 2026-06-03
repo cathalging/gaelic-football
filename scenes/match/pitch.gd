@@ -1,6 +1,9 @@
 extends Node2D
-## Pitch — draws the full GAA pitch surface, markings, and goals.
-## Scale ~13 px/m. Edit constants to resize without touching draw logic.
+## Pitch — draws the full GAA pitch surface, markings, and goals in the tilted
+## "broadcast" perspective (see PitchProjection). The pitch geometry is defined in
+## the flat world plane exactly as the simulation sees it; every point is run
+## through PitchProjection.ground/at_height at draw time, so the surface becomes a
+## trapezoid and the goals stand up as true verticals. Scale ~13 px/m.
 ## Drawing order matters: surface → stripes → markings → rectangles → goals.
 
 # Pitch half-extents, centred on origin. (~140 m × 86 m at 13 px/m.)
@@ -26,12 +29,42 @@ const STRIPE_W   := 130.0
 const LINE_W     := 3.0
 const POST_R     := 6.0
 
+# Goal heights (world px above the ground). The crossbar sits at the ball's own
+# crossbar height so "over the bar = point" lines up exactly with the ball's arc;
+# the uprights continue above it like real posts.
+# Tall uprights: a floated point can sail well above the bar, so the posts must rise
+# high enough that you can read whether the ball passed between them.
+const CROSSBAR_Z := 30.0     # == Ball.CROSSBAR_HEIGHT
+const POST_TOP_Z := 170.0
+
 const C_GRASS    := Color(0.161, 0.502, 0.196)
 const C_STRIPE   := Color(0.141, 0.451, 0.173)
 const C_LINE     := Color(1.0, 1.0, 1.0, 0.92)
-const C_NET      := Color(0.9, 0.9, 0.85, 0.35)
+const C_NET      := Color(0.9, 0.9, 0.85, 0.22)
 const C_POST     := Color(1.0, 1.0, 1.0)
 const C_CROSSBAR := Color(1.0, 0.82, 0.25, 0.95)  # warm bar — matches the ball's over-bar ring
+
+
+# ── Projection helpers ──────────────────────────────────────────────────────────
+# The pitch node sits at the world origin, so a flat world point maps straight
+# through the projection with no extra node offset.
+
+func _g(world: Vector2) -> Vector2:
+	return PitchProjection.ground(world)
+
+
+func _h(world: Vector2, z: float) -> Vector2:
+	return PitchProjection.at_height(world, z)
+
+
+## Draw a straight edge between two flat world points (projected).
+func _wline(a: Vector2, b: Vector2, col: Color, w: float = LINE_W) -> void:
+	draw_line(_g(a), _g(b), col, w)
+
+
+## Fill a flat-world quad (four world corners, in order) as a projected polygon.
+func _wquad(a: Vector2, b: Vector2, c: Vector2, d: Vector2, col: Color) -> void:
+	draw_colored_polygon(PackedVector2Array([_g(a), _g(b), _g(c), _g(d)]), col)
 
 
 func _draw() -> void:
@@ -45,10 +78,10 @@ func _draw() -> void:
 
 
 func _draw_surface() -> void:
-	draw_rect(
-		Rect2(Vector2(-HALF_LENGTH, -HALF_WIDTH), Vector2(HALF_LENGTH * 2.0, HALF_WIDTH * 2.0)),
-		C_GRASS
-	)
+	_wquad(
+		Vector2(-HALF_LENGTH, -HALF_WIDTH), Vector2(HALF_LENGTH, -HALF_WIDTH),
+		Vector2( HALF_LENGTH,  HALF_WIDTH), Vector2(-HALF_LENGTH,  HALF_WIDTH),
+		C_GRASS)
 
 
 func _draw_stripes() -> void:
@@ -56,20 +89,21 @@ func _draw_stripes() -> void:
 	var on := false
 	while x < HALF_LENGTH:
 		if on:
-			draw_rect(
-				Rect2(Vector2(x, -HALF_WIDTH), Vector2(STRIPE_W, HALF_WIDTH * 2.0)),
-				C_STRIPE
-			)
+			var x1 := minf(x + STRIPE_W, HALF_LENGTH)
+			_wquad(
+				Vector2(x,  -HALF_WIDTH), Vector2(x1, -HALF_WIDTH),
+				Vector2(x1,  HALF_WIDTH), Vector2(x,   HALF_WIDTH),
+				C_STRIPE)
 		x += STRIPE_W
 		on = !on
 
 
 func _draw_markings() -> void:
 	# Pitch boundary
-	draw_rect(
-		Rect2(Vector2(-HALF_LENGTH, -HALF_WIDTH), Vector2(HALF_LENGTH * 2.0, HALF_WIDTH * 2.0)),
-		C_LINE, false, LINE_W
-	)
+	_wline(Vector2(-HALF_LENGTH, -HALF_WIDTH), Vector2( HALF_LENGTH, -HALF_WIDTH), C_LINE)
+	_wline(Vector2( HALF_LENGTH, -HALF_WIDTH), Vector2( HALF_LENGTH,  HALF_WIDTH), C_LINE)
+	_wline(Vector2( HALF_LENGTH,  HALF_WIDTH), Vector2(-HALF_LENGTH,  HALF_WIDTH), C_LINE)
+	_wline(Vector2(-HALF_LENGTH,  HALF_WIDTH), Vector2(-HALF_LENGTH, -HALF_WIDTH), C_LINE)
 	# Halfway line (Gaelic football has no centre circle).
 	_vline(0.0)
 	# Symmetric cross-lines from each end (13 m, 20 m, 45 m, 65 m).
@@ -79,7 +113,7 @@ func _draw_markings() -> void:
 
 
 func _vline(x: float) -> void:
-	draw_line(Vector2(x, -HALF_WIDTH), Vector2(x, HALF_WIDTH), C_LINE, LINE_W)
+	_wline(Vector2(x, -HALF_WIDTH), Vector2(x, HALF_WIDTH), C_LINE)
 
 
 ## Draw the small and large rectangles in front of one goal.
@@ -92,34 +126,48 @@ func _draw_rectangles(end_x: float, facing: float) -> void:
 ## Three sides of a goal-area rectangle (the goal line itself is the fourth side).
 func _rect_open_to_field(end_x: float, facing: float, depth: float, hw: float) -> void:
 	var front_x := end_x + facing * depth
-	draw_line(Vector2(end_x, -hw),   Vector2(front_x, -hw), C_LINE, LINE_W)  # top side
-	draw_line(Vector2(front_x, -hw), Vector2(front_x,  hw), C_LINE, LINE_W)  # front edge
-	draw_line(Vector2(front_x,  hw), Vector2(end_x,    hw), C_LINE, LINE_W)  # bottom side
+	_wline(Vector2(end_x, -hw),   Vector2(front_x, -hw), C_LINE)  # top side
+	_wline(Vector2(front_x, -hw), Vector2(front_x,  hw), C_LINE)  # front edge
+	_wline(Vector2(front_x,  hw), Vector2(end_x,    hw), C_LINE)  # bottom side
 
 
 func _draw_goals(end_x: float, facing: float) -> void:
 	# facing: +1 = mouth opens toward +x (right), −1 = toward −x (left).
 	var net_back_x := end_x - facing * GOAL_DEPTH
-	var top         := Vector2(end_x, -GOAL_HW)
-	var bot         := Vector2(end_x,  GOAL_HW)
-	var back_top    := Vector2(net_back_x, -GOAL_HW)
-	var back_bot    := Vector2(net_back_x,  GOAL_HW)
+	var top_w   := Vector2(end_x, -GOAL_HW)   # base of the near upright
+	var bot_w   := Vector2(end_x,  GOAL_HW)   # base of the far upright
+	var bt_w    := Vector2(net_back_x, -GOAL_HW)
+	var bb_w    := Vector2(net_back_x,  GOAL_HW)
 
-	# Net fill (semi-transparent)
-	draw_rect(
-		Rect2(Vector2(minf(end_x, net_back_x), -GOAL_HW), Vector2(GOAL_DEPTH, GOAL_HW * 2.0)),
-		C_NET
-	)
+	# Net floor (semi-transparent) — a quad on the ground behind the line.
+	_wquad(top_w, bt_w, bb_w, bot_w, C_NET)
 
-	# Net side and back frame (three sides; mouth is open on the field side)
-	draw_line(top,      back_top, C_LINE, LINE_W)
-	draw_line(back_top, back_bot, C_LINE, LINE_W)
-	draw_line(back_bot, bot,      C_LINE, LINE_W)
+	# Back frame of the net, standing up to the crossbar height.
+	draw_line(_g(bt_w), _h(bt_w, CROSSBAR_Z), C_NET, LINE_W)
+	draw_line(_g(bb_w), _h(bb_w, CROSSBAR_Z), C_NET, LINE_W)
+	draw_line(_h(bt_w, CROSSBAR_Z), _h(bb_w, CROSSBAR_Z), C_NET, LINE_W)
+	# Net side rails (ground line from front post base to back post base).
+	_wline(top_w, bt_w, C_NET)
+	_wline(bot_w, bb_w, C_NET)
 
-	# Crossbar (goal mouth) — drawn in a warm colour that matches the ball's over-bar
-	# ring, so "ball over the bar between these posts = point" reads at a glance.
-	draw_line(top, bot, C_CROSSBAR, LINE_W * 2.5)
+	# Uprights — true verticals rising from the goal line.
+	var top_base := _g(top_w)
+	var bot_base := _g(bot_w)
+	var top_apex := _h(top_w, POST_TOP_Z)
+	var bot_apex := _h(bot_w, POST_TOP_Z)
+	var top_bar  := _h(top_w, CROSSBAR_Z)
+	var bot_bar  := _h(bot_w, CROSSBAR_Z)
 
-	# Posts — drawn last so they sit on top of all lines
-	draw_circle(top, POST_R, C_POST)
-	draw_circle(bot, POST_R, C_POST)
+	draw_line(top_base, top_apex, C_POST, LINE_W * 1.6)
+	draw_line(bot_base, bot_apex, C_POST, LINE_W * 1.6)
+
+	# Crossbar between the uprights at bar height — warm colour, so "over this bar
+	# and between these posts = point" reads at a glance and lines up with the
+	# ball's own over-bar ring.
+	draw_line(top_bar, bot_bar, C_CROSSBAR, LINE_W * 2.2)
+
+	# Post caps, drawn last so they sit on top.
+	draw_circle(top_apex, POST_R, C_POST)
+	draw_circle(bot_apex, POST_R, C_POST)
+	draw_circle(top_base, POST_R * 0.7, C_POST)
+	draw_circle(bot_base, POST_R * 0.7, C_POST)

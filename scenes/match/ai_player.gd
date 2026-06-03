@@ -148,6 +148,8 @@ const FIRST_TIME_RANGE := 62.0   # strike a loose / incoming ball first-time wit
 
 # Visual
 const C_DOT       := Color(1.0, 1.0, 1.0)
+const C_HEAD      := Color(0.93, 0.80, 0.66)  # billboard "head" so the token reads upright
+const BODY_LIFT   := 16.0   # world px the token is raised off its ground shadow (2.5D)
 const C_MARKER    := Color(1.0, 0.88, 0.1)   # yellow selection triangle
 const C_AIM       := Color(1.0, 0.88, 0.1, 0.90)
 const C_DASH_RDY  := Color(0.30, 1.00, 0.55, 0.95)  # dash ready ring
@@ -1333,6 +1335,22 @@ func _move_toward(target: Vector2, speed: float, delta: float) -> void:
 # ── Rendering ─────────────────────────────────────────────────────────────────
 
 func _draw() -> void:
+	# 2.5D billboard (see PitchProjection). The body keeps drawing in its own local
+	# space centred on Vector2.ZERO exactly as before; we just remap that origin to
+	# the projected, depth-scaled, lifted screen position with draw_set_transform —
+	# so the player stands up on the tilted pitch and every indicator below (rings,
+	# step dots, aim arrow) follows automatically. The physics body never moves.
+	var gp   := global_position
+	var s    := PitchProjection.scale_at(gp.y)
+	var base := PitchProjection.ground(gp) - gp   # node origin → projected ground
+
+	# Ground shadow — a flattened ellipse the token stands on.
+	draw_set_transform(base, 0.0, Vector2(s, s * 0.5))
+	draw_circle(Vector2.ZERO, PLAYER_RADIUS * 0.95, Color(0.0, 0.0, 0.0, 0.28))
+
+	# Lift the whole token off the ground and depth-scale it.
+	draw_set_transform(base + Vector2(0.0, -BODY_LIFT * s), 0.0, Vector2(s, s))
+
 	# Selection marker — yellow downward triangle above the head.
 	if is_selected:
 		var tip   := Vector2(0.0, -PLAYER_RADIUS - 10.0)
@@ -1342,6 +1360,8 @@ func _draw() -> void:
 
 	draw_circle(Vector2.ZERO, PLAYER_RADIUS,       _c_outline)
 	draw_circle(Vector2.ZERO, PLAYER_RADIUS - 2.5, _c_body)
+	# A small "head" lifted toward the top of the token sells the upright figure.
+	draw_circle(Vector2(0.0, -PLAYER_RADIUS * 0.78), PLAYER_RADIUS * 0.46, C_HEAD)
 	draw_circle(facing * (PLAYER_RADIUS * 0.60), 4.0, C_DOT)
 
 	# Stun indicator — visible on any player (so you can read who's out of it).

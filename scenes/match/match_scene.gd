@@ -46,8 +46,18 @@ const REPLAY_SECONDS := 2.0     # how much footage to replay after a goal
 const REPLAY_SPEED   := 0.3     # 0.3× = slow motion
 const REPLAY_FRAMES  := 130     # ring-buffer capacity (~2.1 s at 60 fps)
 
-@onready var _camera: Camera2D = $Ball/Camera2D
+@onready var _camera: Camera2D = $BroadcastCamera
 @onready var _crowd_audio: Node = $CrowdAudio
+
+# ── Broadcast camera ──────────────────────────────────────────────────────────--
+# A TV-style camera over the projected (2.5D) scene: it mostly *turns* to follow
+# play left↔right with a loose, smoothed positional follow, staying near the
+# pitch's vertical centre rather than glued to the ball. See _update_camera.
+const CAM_FOLLOW_X  := 5.0    # horizontal follow responsiveness (loose, smoothed)
+const CAM_FOLLOW_Y  := 2.0    # vertical follow responsiveness (gentler)
+const CAM_VERT_BIAS := 0.30   # only drift this fraction toward the ball's screen y
+const CAM_MAX_ROT   := 0.06   # rad of pan/turn at the extremes of the pitch
+const CAM_ROT_LERP  := 2.5    # how quickly the pan eases toward its target angle
 
 var _fx_rng := RandomNumberGenerator.new()   # presentation-only (shake) — not the sim RNG
 var _shake_mag := 0.0
@@ -222,6 +232,10 @@ func _ready() -> void:
 	_hud.set_clock("H1  00:00")
 	_hud.setup_minimap(_team_a, _team_b, _ball, HALF_LENGTH, HALF_WIDTH)
 
+	# Snap the broadcast camera onto the projected ball so it doesn't swoop in.
+	_camera.make_current()
+	_camera.global_position = PitchProjection.ground(_ball.global_position)
+
 
 ## Pick a steady match wind from the seeded RNG and tell the ball about it. Drawn
 ## once at kick-off so it's deterministic for the match.
@@ -276,6 +290,7 @@ func _physics_process(delta: float) -> void:
 func _process(delta: float) -> void:
 	_switch_timer = maxf(0.0, _switch_timer - delta)
 	_update_shake(delta)
+	_update_camera(delta)
 	if _play_state == Play.REPLAY:
 		_tick_replay(delta)
 		return
@@ -1332,6 +1347,25 @@ func _update_shake(delta: float) -> void:
 		_fx_rng.randf_range(-_shake_mag, _shake_mag),
 		_fx_rng.randf_range(-_shake_mag, _shake_mag)
 	)
+
+
+# ── Broadcast camera ──────────────────────────────────────────────────────────--
+
+## Drive the camera over the projected scene like a TV broadcast: a loose, smoothed
+## follow that mostly turns (rotates) to track play left↔right while staying close
+## to the pitch's vertical centre, rather than locking onto the ball.
+func _update_camera(delta: float) -> void:
+	if _camera == null:
+		return
+	var target := PitchProjection.ground(_ball.global_position)
+	var cam := _camera.global_position
+	var fx := lerpf(cam.x, target.x,                   clampf(CAM_FOLLOW_X * delta, 0.0, 1.0))
+	var fy := lerpf(cam.y, target.y * CAM_VERT_BIAS,   clampf(CAM_FOLLOW_Y * delta, 0.0, 1.0))
+	_camera.global_position = Vector2(fx, fy)
+	# Pan/turn slightly toward whichever end the play is at — the broadcast "the
+	# camera swings to follow the ball downfield" feel.
+	var pan := clampf(_ball.global_position.x / HALF_LENGTH, -1.0, 1.0)
+	_camera.rotation = lerpf(_camera.rotation, pan * CAM_MAX_ROT, clampf(CAM_ROT_LERP * delta, 0.0, 1.0))
 
 
 # ── Slow-motion goal replay ──────────────────────────────────────────────────────
