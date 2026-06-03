@@ -17,6 +17,7 @@ enum State {
 	PLAYER_CAREER,
 	MATCH,
 	SETTINGS,
+	TUTORIAL,
 }
 
 ## Which career the user chose on the main menu. CareerManager uses this to
@@ -29,6 +30,7 @@ enum CareerMode {
 
 const SCENE_MAIN_MENU := "res://ui/main_menu/main_menu.tscn"
 const SCENE_SETTINGS  := "res://ui/settings/settings.tscn"
+const SCENE_TUTORIAL  := "res://ui/tutorial/tutorial.tscn"
 const SCENE_MATCH     := "res://scenes/match/MatchScene.tscn"
 # const SCENE_MANAGER_HUB := "res://scenes/manager/manager_hub.tscn"
 
@@ -66,6 +68,11 @@ func start_quick_play() -> void:
 func open_settings() -> void:
 	_set_state(State.SETTINGS)
 	change_scene(SCENE_SETTINGS)
+
+
+func open_tutorial() -> void:
+	_set_state(State.TUTORIAL)
+	change_scene(SCENE_TUTORIAL)
 
 
 func return_to_main_menu() -> void:

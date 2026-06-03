@@ -21,6 +21,10 @@ func _on_quick_play_pressed() -> void:
 	GameManager.start_quick_play()
 
 
+func _on_tutorial_pressed() -> void:
+	GameManager.open_tutorial()
+
+
 func _on_settings_pressed() -> void:
 	GameManager.open_settings()
 

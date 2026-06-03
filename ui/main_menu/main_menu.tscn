@@ -50,6 +50,12 @@ custom_minimum_size = Vector2(280, 48)
 layout_mode = 2
 text = "Quick Play"
 
+[node name="TutorialButton" type="Button" parent="CenterContainer/VBoxContainer" unique_id=1948358690]
+unique_name_in_owner = true
+custom_minimum_size = Vector2(280, 48)
+layout_mode = 2
+text = "How to Play"
+
 [node name="SettingsButton" type="Button" parent="CenterContainer/VBoxContainer" unique_id=1948358689]
 unique_name_in_owner = true
 custom_minimum_size = Vector2(280, 48)
@@ -65,5 +71,6 @@ text = "Quit"
 [connection signal="pressed" from="CenterContainer/VBoxContainer/ManagerCareerButton" to="." method="_on_manager_career_pressed"]
 [connection signal="pressed" from="CenterContainer/VBoxContainer/PlayerCareerButton" to="." method="_on_player_career_pressed"]
 [connection signal="pressed" from="CenterContainer/VBoxContainer/QuickPlayButton" to="." method="_on_quick_play_pressed"]
+[connection signal="pressed" from="CenterContainer/VBoxContainer/TutorialButton" to="." method="_on_tutorial_pressed"]
 [connection signal="pressed" from="CenterContainer/VBoxContainer/SettingsButton" to="." method="_on_settings_pressed"]
 [connection signal="pressed" from="CenterContainer/VBoxContainer/QuitButton" to="." method="_on_quit_pressed"]
