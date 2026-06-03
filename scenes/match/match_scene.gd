@@ -198,9 +198,9 @@ var _team_a: Array = []   # Array[AIPlayer]
 var _team_b: Array = []   # Array[AIPlayer]
 var _controlled: AIPlayer = null
 
-# Player switching. switch_player picks a defender in the carrier's path, then
-# repeated presses within SWITCH_CYCLE_TIME cycle through the three nearest the
-# carrier. A right-stick flick instead grabs the nearest player in that direction.
+# Player switching. switch_player takes the Team A player nearest the ball (or the
+# opposition carrier), then repeated presses within SWITCH_CYCLE_TIME step out to the
+# next-nearest. A right-stick flick instead grabs the nearest player in that direction.
 const SWITCH_CYCLE_TIME := 1.3
 var _switch_cycle: Array = []   # Array[AIPlayer] — the current shortlist
 var _switch_index := 0
@@ -298,6 +298,7 @@ func _physics_process(delta: float) -> void:
 	_tick_advantage(delta)
 	_check_out_of_bounds()
 	_update_power_bar()
+	_update_landing_indicator()
 	_update_hud_indicators()
 
 
@@ -355,24 +356,19 @@ func _assign_marks() -> void:
 
 # ── Player switching ───────────────────────────────────────────────────────────
 
-## Switching takes a defender in the carrier's path (the man you're running at),
-## not whoever is merely nearest — that was usually a player trailing behind. The
-## first press grabs the best interceptor of the three nearest the carrier;
-## repeated presses cycle through those three.
+## Switching grabs the Team A outfielder closest to the ball — or to the opposition
+## carrier, if there is one — the predictable "give me the man on the ball" pick.
+## Repeated presses within SWITCH_CYCLE_TIME step out to the next-closest, then the
+## next, so you can walk back to a covering defender if the nearest isn't the one.
 func _switch_player() -> void:
 	var ref_pos := _ball.global_position
-	var ref_dir := _ball.velocity
 	var carrier := _opponent_carrier()
 	if carrier:
 		ref_pos = carrier.global_position
-		ref_dir = carrier.velocity if carrier.velocity.length() > 10.0 else carrier.facing
-	if ref_dir.length() < 0.01:
-		ref_dir = Vector2.RIGHT
-	ref_dir = ref_dir.normalized()
 
 	# Keep cycling the same shortlist on rapid presses; rebuild once it lapses.
 	if _switch_timer <= 0.0 or _switch_cycle.is_empty():
-		_switch_cycle = _switch_shortlist(ref_pos, ref_dir)
+		_switch_cycle = _switch_shortlist(ref_pos)
 		_switch_index = 0
 	else:
 		_switch_index = (_switch_index + 1) % _switch_cycle.size()
@@ -389,21 +385,18 @@ func _opponent_carrier() -> AIPlayer:
 	return null
 
 
-## The three Team A players nearest the carrier, ordered with whoever the carrier
-## is running straight at first — so the default switch is the best interceptor and
-## repeated presses cycle through the near three. Excludes the current player.
-func _switch_shortlist(ref_pos: Vector2, ref_dir: Vector2) -> Array:
+## The Team A outfielders nearest `ref_pos`, closest first — the keeper and the
+## current player are excluded. The first switch takes the nearest; repeated presses
+## cycle out through the next few, stepping from the man on the ball outward.
+func _switch_shortlist(ref_pos: Vector2) -> Array:
 	var pool: Array = []
 	for t in _team_a:
 		var ai := t as AIPlayer
-		if ai != _controlled:
+		if ai != _controlled and not ai.is_keeper:
 			pool.append(ai)
 	pool.sort_custom(func(a, b):
 		return a.global_position.distance_to(ref_pos) < b.global_position.distance_to(ref_pos))
-	var near: Array = pool.slice(0, 3)
-	near.sort_custom(func(a, b):
-		return (a.global_position - ref_pos).dot(ref_dir) > (b.global_position - ref_pos).dot(ref_dir))
-	return near
+	return pool.slice(0, 3)
 
 
 ## Read the right stick; a flick switches control to the nearest Team A player in
@@ -830,7 +823,7 @@ func _score_for_home(is_goal: bool) -> void:
 		_hud.show_event("Point!  Home %d-%02d" % [_home_goals, _home_points])
 		if _crowd_audio:
 			_crowd_audio.react_score(false)
-		_begin_score_settle(1)   # let it sail through before the away kickout
+		_begin_settle(1)   # let it sail through before the away kickout
 
 
 func _score_for_away(is_goal: bool) -> void:
@@ -847,7 +840,7 @@ func _score_for_away(is_goal: bool) -> void:
 		_hud.show_event("Point!  Away %d-%02d" % [_away_goals, _away_points])
 		if _crowd_audio:
 			_crowd_audio.react_score(false)
-		_begin_score_settle(0)   # let it sail through before the home kickout
+		_begin_settle(0)   # let it sail through before the home kickout
 
 
 ## A goal: jolt the camera, cheer the crowd, then roll the slow-motion replay.
@@ -873,12 +866,12 @@ func _credit_scorer(scorer: Node2D, is_goal: bool) -> void:
 
 # ── Score settle (post-point) ─────────────────────────────────────────────────--
 
-## After a point, hold the players and let the ball coast on for SCORE_SETTLE_TIME so
-## you actually see it sail over the bar and through the posts (the camera keeps
-## following it), then award the kickout. The ball keeps flying under its own physics
-## while we wait — we just stop awarding the restart instantly. A goal is unaffected
-## (it runs the slow-motion replay instead).
-func _begin_score_settle(kickout_team: int) -> void:
+## After a point — or a shot that drifts wide — hold the players and let the ball
+## coast on for SCORE_SETTLE_TIME so you actually see it sail over the bar / past the
+## post (the camera keeps following it), then award the kickout. The ball keeps flying
+## under its own physics while we wait — we just stop awarding the restart instantly.
+## A goal is unaffected (it runs the slow-motion replay instead).
+func _begin_settle(kickout_team: int) -> void:
 	_play_state          = Play.SETTLE
 	_settle_timer        = SCORE_SETTLE_TIME
 	_settle_kickout_team = kickout_team
@@ -924,8 +917,13 @@ func _check_out_of_bounds() -> void:
 		if _ball.last_touch_team == defending:
 			# Defender put it over their own end line → 45 to the attackers.
 			_award_45(attacking, end_sign, bp.y)
+		elif not carried and _ball.shooter != null:
+			# Attacker's shot drifted wide → let it sail out (camera follows) for the
+			# settle beat before the kickout, the same as a point, rather than snapping
+			# straight to the restart.
+			_begin_settle(defending)
 		else:
-			# Attacker shot wide → kickout to the defending keeper.
+			# A loose ball run out over the end line off an attacker → kickout now.
 			_award_kickout(defending)
 
 
@@ -1008,6 +1006,48 @@ func _update_power_bar() -> void:
 			_hud.set_power(p)
 			return
 	_hud.hide_power()
+
+
+## While the controlled human winds up a kick, project where the ball will come down
+## and mark it with a white cross on the ground (see Ball.show_landing). Cleared the
+## instant the wind-up ends, so the marker only ever shows during a power-up.
+func _update_landing_indicator() -> void:
+	if _controlled and _controlled.is_human_controlled:
+		var shot: Dictionary = _controlled.windup_shot()
+		if shot.get("active", false):
+			_ball.landing_target = _predicted_landing(shot)
+			if not _ball.show_landing:
+				_ball.show_landing = true
+			_ball.queue_redraw()
+			return
+	if _ball.show_landing:
+		_ball.show_landing = false
+		_ball.queue_redraw()
+
+
+## Closed-form landing point for the kick described by `shot` (from AIPlayer.windup_shot).
+## Mirrors Ball.release_* launch params and the FLYING integration (gravity + steady
+## wind), so the cross sits where the ball would land at the current power — ignoring
+## only the random shot spread, which is applied at release.
+func _predicted_landing(shot: Dictionary) -> Vector2:
+	var dir: Vector2 = shot["dir"]
+	dir = dir.normalized() if dir.length() > 0.01 else Vector2.RIGHT
+	var power: float = shot["power"]
+	var speed := 0.0
+	var v0    := 0.0
+	var h0    := 0.0
+	match shot["kind"]:
+		"point":
+			speed = lerpf(360.0, 720.0, power); v0 = lerpf(240.0, 460.0, power); h0 = 5.0
+		"goal":
+			speed = lerpf(540.0, 820.0, power); v0 = lerpf(50.0, 120.0, power);  h0 = 4.0
+		_:  # "kick_pass"
+			speed = lerpf(440.0, 900.0, power); v0 = lerpf(120.0, 200.0, power); h0 = 5.0
+	# Time of flight until the arc returns to the ground: h0 + v0·t − ½g·t² = 0.
+	var g := Ball.GRAVITY
+	var t := (v0 + sqrt(v0 * v0 + 2.0 * g * h0)) / g
+	var vel := dir * speed
+	return _ball.global_position + vel * t + 0.5 * _ball.wind * t * t
 
 
 # ── Events ─────────────────────────────────────────────────────────────────────
@@ -1209,6 +1249,7 @@ func _tick_set_piece(delta: float) -> void:
 			_sp_taker.take_set_piece()   # AI taker kicks now
 		else:
 			_update_power_bar()          # human may be charging a shot
+			_update_landing_indicator()
 	else:
 		# The taker has kicked/passed → play is live again.
 		_resume_play()

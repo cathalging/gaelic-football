@@ -1250,6 +1250,24 @@ func windup_power() -> float:
 	return -1.0
 
 
+## While the human is winding up, describe the kick that would fire if released now,
+## so match_scene can project where it lands and mark the spot. Returns
+## {active: bool, dir: Vector2, power: float, kind: String} where kind is one of
+## "point", "goal", "kick_pass". The power floors match the real release clamps in
+## _fire_shoot / _fire_kick_pass so the prediction tracks the actual kick.
+func windup_shot() -> Dictionary:
+	if _pass_phase == 3:
+		return {"active": true, "dir": aim_dir, "kind": "kick_pass",
+			"power": clampf(_pass_held_t / SHOOT_MAX_HOLD, 0.2, 1.0)}
+	if _shoot_phase == 3:
+		return {"active": true, "dir": aim_dir, "kind": "goal",
+			"power": clampf(_shoot_held_t / SHOOT_MAX_HOLD, 0.3, 1.0)}
+	if _shoot_phase == 4:
+		return {"active": true, "dir": aim_dir, "kind": "point",
+			"power": clampf(_shoot_held_t / SHOOT_MAX_HOLD, 0.3, 1.0)}
+	return {"active": false}
+
+
 ## Cancel any active wind-up — called by match_scene when switching away.
 func cancel_windup() -> void:
 	_pass_phase   = 0

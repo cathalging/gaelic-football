@@ -44,9 +44,17 @@ const CROSSBAR_HEIGHT := 30.0
 ## match_scene. Long kicks drift with it; short hand passes barely feel it.
 var wind := Vector2.ZERO
 
+## Predicted landing marker (PRESENTATION ONLY). While the human winds up a shot or
+## kick pass, match_scene sets `show_landing` + `landing_target` (a flat world point)
+## so the ball draws a white cross on the ground where the kick is projected to come
+## down — a read on where the ball is actually going before you release.
+var show_landing   := false
+var landing_target := Vector2.ZERO
+
 # Visuals
 const RADIUS  := 11.0
 const C_OVER_BAR := Color(1.0, 0.85, 0.25, 0.9)  # halo when the ball is over crossbar height
+const C_LANDING  := Color(1.0, 1.0, 1.0, 0.85)   # predicted landing cross while powering up a kick
 ## Gaelic football is carried in the hands, not at the feet. While CARRIED the ball
 ## is drawn (presentation only — the sim position is unchanged) lifted to about chest
 ## height and nudged to the carrier's leading side, so it reads as held, not dribbled.
@@ -200,3 +208,14 @@ func _draw() -> void:
 	# while carried — the carry lift isn't a shot clearing the bar.
 	if not carried and height > CROSSBAR_HEIGHT:
 		draw_arc(Vector2.ZERO, RADIUS + 4.0, 0.0, TAU, 24, C_OVER_BAR, 2.0)
+
+	# Predicted landing cross — a flat white "X" decal on the projected ground at the
+	# spot the kick is aimed to land. Flattened onto the ground plane (y * 0.5) and
+	# depth-scaled like the shadow so it sits in the 2.5D space, not facing the camera.
+	if show_landing:
+		var ls    := PitchProjection.scale_at(landing_target.y)
+		var lbase := PitchProjection.ground(landing_target) - global_position
+		draw_set_transform(lbase, 0.0, Vector2(ls, ls * 0.5))
+		var r := 9.0
+		draw_line(Vector2(-r, -r), Vector2(r, r), C_LANDING, 2.0)
+		draw_line(Vector2(-r,  r), Vector2(r, -r), C_LANDING, 2.0)
