@@ -148,9 +148,14 @@ const FIRST_TIME_RANGE := 62.0   # strike a loose / incoming ball first-time wit
 
 # Visual
 const C_DOT       := Color(1.0, 1.0, 1.0)
-const C_HEAD      := Color(0.93, 0.80, 0.66)  # billboard "head" so the token reads upright
-const BODY_LIFT   := 16.0   # world px the token is raised off its ground shadow (2.5D)
+## World px the upright billboard sprite stands tall (feet on the ground shadow, head
+## at the top). Indicators anchor relative to this — see _draw and SEL_Y / DOTS_Y.
+const SPRITE_HEIGHT := 56.0
+const SEL_Y       := -SPRITE_HEIGHT - 2.0    # selection-triangle tip, just above the head
+const DOTS_Y      := -SPRITE_HEIGHT - 18.0   # step dots / stun stars, above the head
+const CHEST_Y     := -SPRITE_HEIGHT * 0.5    # aim-arrow origin, mid-figure
 const C_MARKER    := Color(1.0, 0.88, 0.1)   # yellow selection triangle
+const C_CHEVRON   := Color(1.0, 1.0, 1.0, 0.5)  # ground facing chevron
 const C_AIM       := Color(1.0, 0.88, 0.1, 0.90)
 const C_DASH_RDY  := Color(0.30, 1.00, 0.55, 0.95)  # dash ready ring
 const C_DASH_CD   := Color(0.45, 0.45, 0.50, 0.55)  # dash cooling ring (track)
@@ -170,6 +175,11 @@ var team: int = 1
 var ball: Ball   = null
 var teammates: Array = []  # all players on this team (including self)
 var enemies:   Array = []  # all players on the opposing team
+
+## Upright billboard texture drawn in the 2.5D view. Left null, a generated
+## placeholder kit is built in _ready (see MatchSprites); assign a real Texture2D
+## before the node draws to swap in finished art with no other changes.
+var sprite: Texture2D = null
 
 ## Formation position to drift back to when idle/supporting.
 var home_position := Vector2.ZERO
@@ -291,6 +301,8 @@ func _ready() -> void:
 		facing       = Vector2.LEFT
 	if is_keeper:
 		_c_body = C_KEEPER_BODY   # clashing kit so the keeper reads at a glance
+	if sprite == null:
+		sprite = MatchSprites.player(_c_body, _c_outline)   # generated placeholder kit
 	_shot_rng.seed = hash(Vector2i(team, jersey))
 
 
@@ -1335,52 +1347,71 @@ func _move_toward(target: Vector2, speed: float, delta: float) -> void:
 # ── Rendering ─────────────────────────────────────────────────────────────────
 
 func _draw() -> void:
-	# 2.5D billboard (see PitchProjection). The body keeps drawing in its own local
-	# space centred on Vector2.ZERO exactly as before; we just remap that origin to
-	# the projected, depth-scaled, lifted screen position with draw_set_transform —
-	# so the player stands up on the tilted pitch and every indicator below (rings,
-	# step dots, aim arrow) follows automatically. The physics body never moves.
+	# 2.5D sprite billboard (see PitchProjection / MatchSprites). Drawing happens in
+	# three layered transforms, all hung off the projected ground point of the (never
+	# moved) physics body:
+	#   • the GROUND plane (flattened ellipse) — shadow, facing chevron and the status
+	#     rings, which read best lying flat around the feet like a broadcast overlay;
+	#   • the UPRIGHT figure — the depth-scaled sprite standing feet-on-ground;
+	#   • the UPRIGHT labels — selection marker, step dots, stun, aim arrow, anchored
+	#     above the head / at the chest.
 	var gp   := global_position
 	var s    := PitchProjection.scale_at(gp.y)
 	var base := PitchProjection.ground(gp) - gp   # node origin → projected ground
 
-	# Ground shadow — a flattened ellipse the token stands on.
+	# ── Ground plane ────────────────────────────────────────────────────────────
 	draw_set_transform(base, 0.0, Vector2(s, s * 0.5))
-	draw_circle(Vector2.ZERO, PLAYER_RADIUS * 0.95, Color(0.0, 0.0, 0.0, 0.28))
+	draw_circle(Vector2.ZERO, PLAYER_RADIUS * 1.05, Color(0.0, 0.0, 0.0, 0.28))
+	_draw_facing_chevron()
+	if _stun_timer > 0.0:
+		draw_arc(Vector2.ZERO, PLAYER_RADIUS + 6.0, 0.0, TAU, 28, C_STUN, 2.0, true)
+	if is_human_controlled:
+		_draw_dash_ring()   # dash is available to any controlled player (trial)
+		if not is_carrying:
+			if _jockeying:
+				_draw_jockey()
+			# Tackle engagement — the dwell filling while pressing a carrier, then a
+			# solid ring the instant a tackle can be committed (see can_tackle).
+			if _engage_time > 0.0 or _tackle_cd > 0.0:
+				_draw_engage_ring()
 
-	# Lift the whole token off the ground and depth-scale it.
-	draw_set_transform(base + Vector2(0.0, -BODY_LIFT * s), 0.0, Vector2(s, s))
+	# ── Upright billboard ───────────────────────────────────────────────────────
+	draw_set_transform(base, 0.0, Vector2(s, s))
+	if sprite != null:
+		var ts := sprite.get_size()
+		var h  := SPRITE_HEIGHT
+		var w  := h * ts.x / ts.y
+		draw_texture_rect(sprite, Rect2(-w * 0.5, -h, w, h), false)
+	else:
+		# Fallback if no texture was built — a plain upright disc.
+		draw_circle(Vector2(0.0, -PLAYER_RADIUS), PLAYER_RADIUS, _c_body)
 
-	# Selection marker — yellow downward triangle above the head.
+	# ── Upright labels (above the head / at the chest) ──────────────────────────
 	if is_selected:
-		var tip   := Vector2(0.0, -PLAYER_RADIUS - 10.0)
+		var tip   := Vector2(0.0, SEL_Y)
 		var left  := tip + Vector2(-7.0, -13.0)
 		var right := tip + Vector2( 7.0, -13.0)
 		draw_colored_polygon(PackedVector2Array([left, right, tip]), C_MARKER)
-
-	draw_circle(Vector2.ZERO, PLAYER_RADIUS,       _c_outline)
-	draw_circle(Vector2.ZERO, PLAYER_RADIUS - 2.5, _c_body)
-	# A small "head" lifted toward the top of the token sells the upright figure.
-	draw_circle(Vector2(0.0, -PLAYER_RADIUS * 0.78), PLAYER_RADIUS * 0.46, C_HEAD)
-	draw_circle(facing * (PLAYER_RADIUS * 0.60), 4.0, C_DOT)
-
-	# Stun indicator — visible on any player (so you can read who's out of it).
 	if _stun_timer > 0.0:
-		_draw_stun()
-
+		_draw_stun_stars()
 	if is_human_controlled:
 		if is_set_piece_taker or _pass_phase != 0 or _shoot_phase != 0:
 			_draw_aim_arrow()
-		_draw_dash_ring()   # dash is available to any controlled player (trial)
 		if is_carrying:
 			_draw_step_dots()
-		else:
-			if _jockeying:
-				_draw_jockey()
-			# Tackle engagement — show the dwell filling while pressing a carrier, and
-			# a solid ring the instant a tackle can be committed (see can_tackle).
-			if _engage_time > 0.0 or _tackle_cd > 0.0:
-				_draw_engage_ring()
+
+
+## A small ground-plane arrow at the feet pointing where the player faces — the
+## billboard sprite is front-on, so this is what reads facing/aim in the tilted view.
+func _draw_facing_chevron() -> void:
+	if facing.length() < 0.01:
+		return
+	var f    := facing.normalized()
+	var perp := Vector2(-f.y, f.x)
+	var tip  := f * (PLAYER_RADIUS + 7.0)
+	var bl   := f * (PLAYER_RADIUS - 1.0) + perp * 5.0
+	var br   := f * (PLAYER_RADIUS - 1.0) - perp * 5.0
+	draw_colored_polygon(PackedVector2Array([bl, br, tip]), C_CHEVRON)
 
 
 ## Ring around the human carrier showing dash availability: solid green when
@@ -1414,11 +1445,10 @@ func _draw_engage_ring() -> void:
 		draw_arc(Vector2.ZERO, r, start, start + TAU * frac, 32, C_ENGAGE_FIL, 2.5, true)
 
 
-func _draw_stun() -> void:
-	draw_arc(Vector2.ZERO, PLAYER_RADIUS + 4.0, 0.0, TAU, 24, C_STUN, 2.0, true)
-	var y := -PLAYER_RADIUS - 12.0
+## Stun "stars" above the head (the matching ground ring is drawn in _draw).
+func _draw_stun_stars() -> void:
 	for i in 3:
-		draw_circle(Vector2((i - 1) * 8.0, y), 2.5, C_STUN)
+		draw_circle(Vector2((i - 1) * 8.0, DOTS_Y), 2.5, C_STUN)
 
 
 ## A short arc in the facing direction while containing — a read on who you're
@@ -1429,9 +1459,10 @@ func _draw_jockey() -> void:
 
 
 func _draw_aim_arrow() -> void:
-	var tip  := aim_dir * 52.0
+	var o    := Vector2(0.0, CHEST_Y)   # springs from the chest, not the feet
+	var tip  := o + aim_dir * 52.0
 	var perp := Vector2(-aim_dir.y, aim_dir.x)
-	draw_line(Vector2.ZERO, tip,                               C_AIM, 2.0)
+	draw_line(o, tip,                                         C_AIM, 2.0)
 	draw_line(tip, tip - aim_dir * 11.0 + perp * 7.0,         C_AIM, 2.0)
 	draw_line(tip, tip - aim_dir * 11.0 - perp * 7.0,         C_AIM, 2.0)
 
@@ -1439,7 +1470,7 @@ func _draw_aim_arrow() -> void:
 func _draw_step_dots() -> void:
 	var spacing    := 11.0
 	var total_w    := (MAX_STEPS - 1.0) * spacing
-	var y_off      := -PLAYER_RADIUS - 14.0
+	var y_off      := DOTS_Y
 	var steps_used := int(steps_taken)
 	for i in int(MAX_STEPS):
 		var cx  := -total_w * 0.5 + i * spacing

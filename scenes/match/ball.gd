@@ -46,9 +46,21 @@ var wind := Vector2.ZERO
 
 # Visuals
 const RADIUS  := 11.0
-const C_SEAM  := Color(0.55, 0.34, 0.14)
-const C_INNER := Color(0.98, 0.93, 0.76)
 const C_OVER_BAR := Color(1.0, 0.85, 0.25, 0.9)  # halo when the ball is over crossbar height
+## Gaelic football is carried in the hands, not at the feet. While CARRIED the ball
+## is drawn (presentation only — the sim position is unchanged) lifted to about chest
+## height and nudged to the carrier's leading side, so it reads as held, not dribbled.
+const CARRY_HEIGHT := 22.0   # world-z the held ball sits at (≈ chest/hands)
+const CARRY_SIDE   := 5.0    # screen px the held ball sits to the carrier's facing side
+
+## Generated ball billboard (see MatchSprites). Swappable for real art — assign a
+## Texture2D before the first draw and nothing else changes.
+var sprite: Texture2D = null
+
+
+func _ready() -> void:
+	if sprite == null:
+		sprite = MatchSprites.ball()
 
 
 func _physics_process(delta: float) -> void:
@@ -145,27 +157,46 @@ func release_kick(direction: Vector2, power: float, is_goal: bool) -> void:
 func _draw() -> void:
 	# 2.5D height illusion in the broadcast view (see PitchProjection). The SHADOW
 	# sits on the projected ground at the ball's true world position — the honest
-	# read of where it is relative to the posts (what scoring uses). The ball SPRITE
-	# lifts along the same height→screen mapping the goalposts use, so a lofted point
-	# visibly clears the crossbar, and it GROWS with height so "up in the air" reads
-	# at a glance.
+	# read of where it is relative to the posts (what scoring uses) — and shrinks as
+	# the ball climbs. The ball SPRITE lifts along the same height→screen mapping the
+	# goalposts use, so a lofted point visibly clears the crossbar, while its size is
+	# led by depth (near = big, far = small) so it sits properly in the tilted space.
 	var gp   := global_position
 	var s    := PitchProjection.scale_at(gp.y)
 	var base := PitchProjection.ground(gp) - gp   # node origin → projected ground
 
+	# While carried, lift the ball to hand height and offset it to the carrier's
+	# leading side so it reads as held in the hands rather than at the feet.
+	var carried  := ball_state == State.CARRIED and carrier != null
+	var draw_h   := height
+	var side_off := 0.0
+	if carried:
+		draw_h = CARRY_HEIGHT
+		var cf: Variant = carrier.get("facing")
+		if cf is Vector2 and (cf as Vector2).length() > 0.01:
+			side_off = signf((cf as Vector2).x) * CARRY_SIDE
+
 	# Ground shadow — a flattened ellipse that shrinks as the ball climbs.
-	var shrink := clampf(1.0 - height / 240.0, 0.35, 1.0)
+	var shrink := clampf(1.0 - draw_h / 240.0, 0.35, 1.0)
 	draw_set_transform(base, 0.0, Vector2(s, s * 0.5))
 	draw_circle(Vector2.ZERO, RADIUS * shrink, Color(0.0, 0.0, 0.0, 0.30))
 
-	# Ball sprite — lifted by its arc height and grown as it rises.
-	var lift_px := PitchProjection.lift(gp.y, height)
-	var grow    := clampf(1.0 + height / 90.0, 1.0, 2.4)
-	draw_set_transform(base + Vector2(0.0, -lift_px), 0.0, Vector2(s * grow, s * grow))
-	draw_circle(Vector2.ZERO, RADIUS,       C_SEAM)
-	draw_circle(Vector2.ZERO, RADIUS - 1.8, C_INNER)
+	# Ball sprite. Size is led by the DEPTH scale `s` (nearer touchline = bigger,
+	# far = smaller) so the ball sits in the 2.5D space; height is read from the lift
+	# and the over-bar ring, not by ballooning the ball — in a side-on view a lofted
+	# ball rises and recedes, it doesn't grow. So `grow` is only a subtle "coming at
+	# you" pop, capped low, and never fights the depth cue.
+	var lift_px := PitchProjection.lift(gp.y, draw_h)
+	var grow    := clampf(1.0 + draw_h / 320.0, 1.0, 1.2)
+	draw_set_transform(base + Vector2(side_off * s, -lift_px), 0.0, Vector2(s * grow, s * grow))
+	if sprite != null:
+		var d := RADIUS * 2.0
+		draw_texture_rect(sprite, Rect2(-d * 0.5, -d * 0.5, d, d), false)
+	else:
+		draw_circle(Vector2.ZERO, RADIUS, Color(0.97, 0.93, 0.80))
 
 	# Over the crossbar — ring the ball so "this is a point, sailing over the bar"
-	# reads instantly (and a driven goal attempt staying under the bar does not).
-	if height > CROSSBAR_HEIGHT:
+	# reads instantly (and a driven goal attempt staying under the bar does not). Not
+	# while carried — the carry lift isn't a shot clearing the bar.
+	if not carried and height > CROSSBAR_HEIGHT:
 		draw_arc(Vector2.ZERO, RADIUS + 4.0, 0.0, TAU, 24, C_OVER_BAR, 2.0)

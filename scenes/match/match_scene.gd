@@ -31,12 +31,21 @@ const AI_SET_PIECE_DELAY := 1.5  # seconds an AI taker waits before kicking
 # LIVE      — open play.
 # SET_PIECE — ball placed for a free/45/penalty/kickout/sideline, counting down.
 # REPLAY    — slow-motion action replay of the last couple of seconds (after a goal).
-enum Play { LIVE, SET_PIECE, REPLAY }
+# SETTLE    — brief post-point pause: players hold, the ball is left to sail through
+#             the posts (the camera follows it) before the kickout is awarded, so a
+#             point isn't whisked off the line the instant it crosses.
+enum Play { LIVE, SET_PIECE, REPLAY, SETTLE }
 var _play_state := Play.LIVE
 var _sp_timer     := 0.0
 var _sp_countdown := 0.0
 var _sp_taker: AIPlayer = null
 var _sp_label   := ""
+
+# ── Score settle (post-point) ─────────────────────────────────────────────────--
+## Seconds a point is left to sail on (real time) before the kickout is awarded.
+const SCORE_SETTLE_TIME := 1.1
+var _settle_timer        := 0.0
+var _settle_kickout_team := 0
 
 # ── Goal feel: screen shake + slow-motion replay ─────────────────────────────────
 const GOAL_SHAKE     := 16.0    # camera shake magnitude (px) on a goal
@@ -259,6 +268,9 @@ func _unhandled_input(event: InputEvent) -> void:
 func _physics_process(delta: float) -> void:
 	if _play_state == Play.REPLAY:
 		return
+	if _play_state == Play.SETTLE:
+		_tick_settle(delta)
+		return
 	if _play_state == Play.SET_PIECE:
 		_tick_set_piece(delta)
 		return
@@ -280,6 +292,8 @@ func _physics_process(delta: float) -> void:
 	_check_shot_block(delta)
 	_check_keeper_save()
 	_check_scoring()
+	if _play_state != Play.LIVE:
+		return   # a score just fired (→ SETTLE / REPLAY); don't also run mark/OOB this frame
 	_check_mark()
 	_tick_advantage(delta)
 	_check_out_of_bounds()
@@ -294,7 +308,7 @@ func _process(delta: float) -> void:
 	if _play_state == Play.REPLAY:
 		_tick_replay(delta)
 		return
-	if _clock_frozen or _play_state == Play.SET_PIECE or _contest_active:
+	if _clock_frozen or _play_state == Play.SET_PIECE or _play_state == Play.SETTLE or _contest_active:
 		return
 	_match_time += delta * CLOCK_SPEED
 	_update_clock_display()
@@ -816,7 +830,7 @@ func _score_for_home(is_goal: bool) -> void:
 		_hud.show_event("Point!  Home %d-%02d" % [_home_goals, _home_points])
 		if _crowd_audio:
 			_crowd_audio.react_score(false)
-		_award_kickout(1)
+		_begin_score_settle(1)   # let it sail through before the away kickout
 
 
 func _score_for_away(is_goal: bool) -> void:
@@ -833,7 +847,7 @@ func _score_for_away(is_goal: bool) -> void:
 		_hud.show_event("Point!  Away %d-%02d" % [_away_goals, _away_points])
 		if _crowd_audio:
 			_crowd_audio.react_score(false)
-		_award_kickout(0)
+		_begin_score_settle(0)   # let it sail through before the home kickout
 
 
 ## A goal: jolt the camera, cheer the crowd, then roll the slow-motion replay.
@@ -855,6 +869,29 @@ func _credit_scorer(scorer: Node2D, is_goal: bool) -> void:
 	else:
 		tally.y += 1
 	_scorers[scorer] = tally
+
+
+# ── Score settle (post-point) ─────────────────────────────────────────────────--
+
+## After a point, hold the players and let the ball coast on for SCORE_SETTLE_TIME so
+## you actually see it sail over the bar and through the posts (the camera keeps
+## following it), then award the kickout. The ball keeps flying under its own physics
+## while we wait — we just stop awarding the restart instantly. A goal is unaffected
+## (it runs the slow-motion replay instead).
+func _begin_score_settle(kickout_team: int) -> void:
+	_play_state          = Play.SETTLE
+	_settle_timer        = SCORE_SETTLE_TIME
+	_settle_kickout_team = kickout_team
+	_adv_active          = false   # the score ends any running advantage
+	_freeze_all(true)              # players hold; the (flying) ball is unaffected
+
+
+func _tick_settle(delta: float) -> void:
+	_settle_timer -= delta
+	_update_hud_indicators()
+	if _settle_timer <= 0.0:
+		_play_state = Play.LIVE   # _award_kickout re-freezes for the set piece
+		_award_kickout(_settle_kickout_team)
 
 
 # ── Out of bounds ──────────────────────────────────────────────────────────────
