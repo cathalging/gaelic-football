@@ -84,13 +84,33 @@ const SEP_PUSH_MAX := 90.0    # cap on the separation steering offset
 const SHIFT_X_MAX  := 200.0   # how far the block slides toward the ball (x)
 const SHIFT_Y_MAX  := 110.0   # …and (y)
 
+# Steering / avoidance — players arc around bodies in their path instead of
+# jamming into them. A general lateral nudge handles off-ball movers and chasers;
+# the carrier gets the richer context-steering below. Scaled by the team's
+# `tactics.avoidance_strength` (0 = barge straight through).
+const AVOID_RADIUS   := 46.0   # a body within this, ahead of our heading, is steered around
+const AVOID_STRENGTH := 1.3    # base lateral weight (× tactics.avoidance_strength)
+# Carrier context-steering — each frame a fan of candidate headings is scored by
+# forward progress minus the danger of bodies in that lane, and the best lane is
+# driven. This is what makes a carrier veer around a defender toward open ground
+# rather than running into them and stalling. Fully geometric → deterministic.
+const CARRY_LANES      : Array[float] = [-1.05, -0.7, -0.35, 0.0, 0.35, 0.7, 1.05]
+const CARRY_LOOKAHEAD  := 160.0   # px ahead a candidate lane is scanned for blockers
+const CARRY_LANE_WIDTH := 42.0    # px either side of a lane within which a body blocks it
+
 # Man-marking & off-the-ball movement (Group A). Backs/mids track their man when
 # defending, which pulls them out of the goalmouth when a forward roams; forwards
-# push up off the ball when attacking, giving the carrier a runner to find.
-const MARK_GOALSIDE := 42.0   # how far goalside of his man a marker stands
-const RUN_SUPPORT   := 70.0   # how far forwards push toward goal off the ball
-const PASS_LEAD     := 46.0   # lead a forward run slightly toward goal on a pass
+# make runs / hold a supporting shape when attacking, giving the carrier a runner to
+# find. The tunables for this — mark tightness, support push, pass lead, runner
+# count, attacking width — now live on TacticsData and are read via _tactics().
 const KICK_PASS_RANGE := 330.0 # passes longer than this are delivered as a kick pass
+# Off-the-ball runs — a chosen runner samples receiving spots (a fan goalside of
+# itself) and moves to the most open one that sits in a clear passing lane, so the
+# carrier always has a forward option instead of a static line. See _run_into_space.
+const RECEIVE_ANGLES : Array[float] = [-1.0, -0.55, -0.25, 0.0, 0.25, 0.55, 1.0]
+const RECEIVE_DISTS  : Array[float] = [85.0, 160.0]
+const MAX_RECEIVE_DIST := 540.0          # ignore a run needing an unrealistically long pass
+const RECEIVE_LANE_PENALTY := 100000.0   # a blocked passing lane all but rules a spot out
 # Sidestep — dashing while carrying beats a close defender: a lateral kink around
 # them plus a brief window where their tackle can't land.
 const SIDESTEP_IMMUNITY := 0.35
@@ -105,7 +125,6 @@ const DECISION_DELAY := 0.5     # seconds after pickup before pass/shoot decisio
 # and never fires two passes in quick succession. This is what gives a defender a
 # carrier to chase down and tackle, instead of the ball being offloaded the
 # instant you close in.
-const PRESSURE_RADIUS  := 150.0   # an opponent this close = under pressure
 const PASS_COOLDOWN    := 0.8     # min seconds between AI passes (no ping-pong)
 const POINT_RANGE      := 430.0   # will take a point from out to here (GAA long range)
 const GOAL_MOUTH_RANGE := 380.0   # inside this, funnel the carry toward the goal mouth
@@ -175,6 +194,12 @@ var team: int = 1
 var ball: Ball   = null
 var teammates: Array = []  # all players on this team (including self)
 var enemies:   Array = []  # all players on the opposing team
+
+## This team's behaviour profile (press, marking, runs, steering). Set by
+## match_scene on spawn; every tactical decision reads from it instead of a baked
+## constant, so a club's tactics can vary behaviour without touching this script.
+## Falls back to baseline values when null (see _tactics).
+var tactics: TacticsData = null
 
 ## Upright billboard texture drawn in the 2.5D view. Left null, a generated
 ## placeholder kit is built in _ready (see MatchSprites); assign a real Texture2D
@@ -304,6 +329,20 @@ func _ready() -> void:
 	if sprite == null:
 		sprite = MatchSprites.player(_c_body, _c_outline)   # generated placeholder kit
 	_shot_rng.seed = hash(Vector2i(team, jersey))
+
+
+## Shared fallback profile so the node is runnable even if match_scene never wired
+## one (isolated scene, tests). Construct lazily — every default plays as the old
+## hand-tuned constants did.
+static var _default_tactics: TacticsData = null
+
+## The active tactics profile (the team's, or the shared baseline default).
+func _tactics() -> TacticsData:
+	if tactics != null:
+		return tactics
+	if _default_tactics == null:
+		_default_tactics = TacticsData.new()
+	return _default_tactics
 
 
 func _physics_process(delta: float) -> void:
@@ -572,7 +611,7 @@ func _run_with_ball(delta: float) -> void:
 
 	# Settle on the ball briefly before deciding anything.
 	if _carry_timer < DECISION_DELAY:
-		_move_toward(_carry_drive_target(), _carry_speed(), delta)
+		_move_dir(_carry_steer_dir(), _carry_speed(), delta)
 		return
 
 	var dist_goal := global_position.distance_to(_goal_centre)
@@ -583,7 +622,7 @@ func _run_with_ball(delta: float) -> void:
 		_ai_shoot(_goal_lane_clear())
 		return
 
-	var pressured := _nearest_enemy_distance() < PRESSURE_RADIUS
+	var pressured := _nearest_enemy_distance() < _tactics().press_trigger_distance
 	var stuck := _carry_is_stuck(delta)
 
 	# Only offload when actually pressured (or grinding to a halt). Otherwise back
@@ -605,10 +644,12 @@ func _run_with_ball(delta: float) -> void:
 		_solo_slow  = SOLO_SLOW_DURATION
 		return
 
-	# Burst away from a close presser when there's open ground ahead to run into.
+	# Burst away from a close presser, bursting along the open lane (not blindly
+	# downfield) so the dash carries the carrier around the defender, not into them.
+	var steer := _carry_steer_dir()
 	if pressured:
-		_maybe_dash(_carry_drive_target() - global_position)
-	_move_toward(_carry_drive_target(), _carry_speed(), delta)
+		_maybe_dash(steer)
+	_move_dir(steer, _carry_speed(), delta)
 
 
 ## Closest opponent distance — used to decide if the carrier is under pressure.
@@ -642,22 +683,59 @@ func _current_enemy_carrier() -> AIPlayer:
 	return null
 
 
-## Where an AI carrier drives toward: forward (attack direction), but steered
-## back infield when it gets near a touchline or end line so it doesn't dribble
-## out of bounds and force a restart.
-func _carry_drive_target() -> Vector2:
-	# Near the opponent end, funnel toward the goal mouth so an off-centre carrier
-	# converges on a shooting position instead of running along the end line (which
-	# used to leave it stuck, never inside SHOOT_RANGE of the goal centre).
+## The carrier's *desired* heading before avoidance: toward the goal mouth when in
+## range (so an off-centre carrier converges on a shooting position instead of
+## running along the end line), otherwise downfield — steered back infield near a
+## touchline or end line so it doesn't dribble out of bounds and force a restart.
+func _carry_heading() -> Vector2:
 	if global_position.distance_to(_goal_centre) < GOAL_MOUTH_RANGE:
-		return _goal_centre
-	# Further out, drive straight downfield, steering off the touchlines/end line.
+		var to_goal := _goal_centre - global_position
+		return to_goal.normalized() if to_goal.length() > 0.01 else _attack_dir
 	var drive := _attack_dir
 	if absf(global_position.y) > PITCH_HALF_WIDTH - EDGE_MARGIN:
 		drive.y -= signf(global_position.y) * 1.3
 	if absf(global_position.x) > PITCH_HALF_LENGTH - EDGE_MARGIN:
 		drive.x -= signf(global_position.x) * 1.3
-	return global_position + drive.normalized() * 80.0
+	return drive.normalized()
+
+
+## Context-steering: choose the carry heading that best trades forward progress for
+## a clear lane, so the carrier arcs around defenders toward open ground instead of
+## dribbling into them and grinding to a halt. Samples a fan of headings around the
+## goal-seeking direction, scores each by progress minus the danger of bodies in
+## that lane, and returns the winner. Deterministic — no RNG.
+func _carry_steer_dir() -> Vector2:
+	var goal_dir := _carry_heading()
+	var avoid := _tactics().avoidance_strength
+	var best_dir := goal_dir
+	var best_score := -INF
+	for off in CARRY_LANES:
+		var cand := goal_dir.rotated(off)
+		var progress := cand.dot(goal_dir)   # 1 dead ahead … less to the sides
+		var score := progress - _lane_danger(cand) * avoid
+		if score > best_score:
+			best_score = score
+			best_dir   = cand
+	return best_dir
+
+
+## How blocked a candidate carry lane is: opponents standing ahead within
+## CARRY_LOOKAHEAD and close to the lane add danger, weighted by how central and how
+## near they are. 0 = a clear run. Used only by _carry_steer_dir.
+func _lane_danger(dir: Vector2) -> float:
+	var danger := 0.0
+	for e in enemies:
+		var rel := (e as AIPlayer).global_position - global_position
+		var along := rel.dot(dir)
+		if along <= 0.0 or along > CARRY_LOOKAHEAD:
+			continue   # behind us, or beyond how far we look ahead
+		var lateral := (rel - dir * along).length()
+		if lateral > CARRY_LANE_WIDTH:
+			continue   # not in this lane
+		var lat_w  := 1.0 - lateral / CARRY_LANE_WIDTH   # central blockers are worse
+		var near_w := 1.0 - along / CARRY_LOOKAHEAD       # closer blockers are worse
+		danger += lat_w * near_w
+	return danger
 
 
 # ── Team shape ───────────────────────────────────────────────────────────────
@@ -668,8 +746,8 @@ func _carry_drive_target() -> Vector2:
 func _off_ball_target() -> Vector2:
 	if _should_mark():
 		return _marking_position()
-	if _team_in_possession() == team and not is_keeper:
-		return _support_run_position()
+	if _team_in_possession() == team and not is_keeper and not is_carrying:
+		return _attack_off_ball_target()
 	return _tactical_position()
 
 
@@ -704,27 +782,117 @@ func _marking_position() -> Vector2:
 	var to_goal := (own_goal - mark_target.global_position)
 	if to_goal.length() > 0.01:
 		to_goal = to_goal.normalized()
-	return mark_target.global_position + to_goal * MARK_GOALSIDE + _separation()
+	return mark_target.global_position + to_goal * _tactics().mark_goalside + _separation()
 
 
-## A forward's supporting run: hold the zonal slot but push toward the opposition
-## goal so the defence has to come up with us, opening space behind.
-func _support_run_position() -> Vector2:
-	var base := _tactical_position()
-	var to_goal := _goal_centre - global_position
-	if to_goal.length() > GOAL_MOUTH_RANGE:
-		base += to_goal.normalized() * RUN_SUPPORT
+## Off-the-ball destination when our team has the ball: the chosen runners break
+## into open space to receive; everyone else holds a supporting attacking shape that
+## stretches the defence and offers a recycle outlet. This is what gives the carrier
+## (AI or human) someone to pass to instead of a static line.
+func _attack_off_ball_target() -> Vector2:
+	var carrier := _own_carrier()
+	if carrier != null and _is_attacker() and _is_active_runner(carrier):
+		return _run_into_space(carrier)
+	return _support_shape_position()
+
+
+## Our team's current ball carrier (the human or an AI teammate), or null.
+func _own_carrier() -> AIPlayer:
+	for t in teammates:
+		var tm := t as AIPlayer
+		if tm.is_carrying:
+			return tm
+	return null
+
+
+## A forward — holds no marking duty and is not the keeper, so it plays high and is
+## eligible to make off-the-ball runs. (Backs and midfielders mark / hold shape.)
+func _is_attacker() -> bool:
+	return not is_keeper and mark_target == null
+
+
+## True if this attacker is one of the team's `runner_count` designated runners — the
+## attackers nearest the opposition goal. Every teammate evaluates the same ranking
+## over the same data (deterministically, tie-broken by jersey), so they agree on who
+## runs without any central assignment. The carrier and the human pick their own
+## movement, so both are excluded from the runner pool.
+func _is_active_runner(carrier: AIPlayer) -> bool:
+	var rc := _tactics().runner_count
+	if rc <= 0:
+		return false
+	var my_d := global_position.distance_to(_goal_centre)
+	var ahead := 0   # eligible attackers ranked above us (nearer goal)
+	for t in teammates:
+		var tm := t as AIPlayer
+		if tm == self or tm == carrier or tm.is_human_controlled or not tm._is_attacker():
+			continue
+		var d := tm.global_position.distance_to(_goal_centre)
+		if d < my_d or (is_equal_approx(d, my_d) and tm.jersey < jersey):
+			ahead += 1
+	return ahead < rc
+
+
+## Pick a spot to run onto: sample a fan of points goalside of ourselves and choose
+## the one that is most open AND sits in a clear passing lane from the carrier, with a
+## bias toward getting in behind (stronger the more `directness` the tactics carry).
+## Deterministic — geometric scoring, no RNG. Separation keeps multiple runners apart.
+func _run_into_space(carrier: AIPlayer) -> Vector2:
+	var goal_dir := _goal_centre - global_position
+	goal_dir = goal_dir.normalized() if goal_dir.length() > 0.01 else _attack_dir
+	var w_goal := 0.4 + _tactics().directness * 0.6   # direct sides favour the run in behind
+	var best := global_position
+	var best_score := -INF
+	for ang in RECEIVE_ANGLES:
+		var dir := goal_dir.rotated(ang)
+		for dist in RECEIVE_DISTS:
+			var spot := global_position + dir * dist
+			if absf(spot.x) > PITCH_HALF_LENGTH - EDGE_MARGIN \
+					or absf(spot.y) > PITCH_HALF_WIDTH - EDGE_MARGIN:
+				continue   # would run off the pitch
+			var score := _receive_spot_score(spot, carrier, w_goal)
+			if score > best_score:
+				best_score = score
+				best       = spot
+	return best + _separation()
+
+
+## Score a candidate receiving spot: reward open space and getting goalside of the
+## carrier; all but rule out a spot whose passing lane is already cut, or one so far
+## the pass would be unrealistic.
+func _receive_spot_score(spot: Vector2, carrier: AIPlayer, w_goal: float) -> float:
+	var openness := _nearest_enemy_to(spot)
+	var goal_gain := carrier.global_position.distance_to(_goal_centre) \
+			- spot.distance_to(_goal_centre)
+	var score := openness + maxf(0.0, goal_gain) * w_goal
+	if _pass_lane_blocked(carrier.global_position, spot):
+		score -= RECEIVE_LANE_PENALTY
+	if carrier.global_position.distance_to(spot) > MAX_RECEIVE_DIST:
+		score -= RECEIVE_LANE_PENALTY
+	return score
+
+
+## A supporting attacking shape for non-runners: the zonal slot (widened by the
+## tactics' attacking width), with forwards still pushing toward goal so the defence
+## has to come up and space opens behind. Midfielders/backs hold to offer a recycle.
+func _support_shape_position() -> Vector2:
+	var base := _tactical_position(_tactics().attacking_width)
+	if _is_attacker():
+		var to_goal := _goal_centre - global_position
+		if to_goal.length() > GOAL_MOUTH_RANGE:
+			base += to_goal.normalized() * _tactics().support_distance
 	return base
 
 
-func _tactical_position() -> Vector2:
-	# The whole team slides toward the ball as a single block, so each player
-	# keeps their formation lane relative to teammates instead of converging on
-	# the ball. This is what stops the "everyone in one pile" behaviour.
+## The zonal slot, with the whole team sliding toward the ball as one block so each
+## player keeps their formation lane instead of converging on the ball (this is what
+## stops the "everyone in one pile" behaviour). `width` scales the lane's spread off
+## centre — the attacking shape widens it (see _support_shape_position); defaults to
+## 1.0 so every other caller is unchanged.
+func _tactical_position(width: float = 1.0) -> Vector2:
 	var shift_x := clampf(ball.global_position.x * 0.40, -SHIFT_X_MAX, SHIFT_X_MAX)
 	var shift_y := clampf(ball.global_position.y * 0.30, -SHIFT_Y_MAX, SHIFT_Y_MAX)
 	var tx := clampf(home_position.x + shift_x, -860.0, 860.0)
-	var ty := clampf(home_position.y + shift_y, -540.0, 540.0)
+	var ty := clampf(home_position.y * width + shift_y, -540.0, 540.0)
 	return Vector2(tx, ty) + _separation()
 
 
@@ -777,7 +945,7 @@ func _shoot_ball(dir: Vector2, power: float, is_goal: bool) -> void:
 func _shot_spread(power: float) -> float:
 	var dist := global_position.distance_to(_goal_centre)
 	var range_factor := clampf(dist / POINT_RANGE, 0.0, 1.0)
-	var pressure := 1.0 - clampf(_nearest_enemy_distance() / PRESSURE_RADIUS, 0.0, 1.0)
+	var pressure := 1.0 - clampf(_nearest_enemy_distance() / _tactics().press_trigger_distance, 0.0, 1.0)
 	var difficulty := clampf(range_factor * 0.7 + pressure * 0.5, 0.0, 1.0)
 	var overcharge := clampf((power - OVERCHARGE_KNEE) / (1.0 - OVERCHARGE_KNEE), 0.0, 1.0)
 	return difficulty * MAX_SHOT_SPREAD + overcharge * OVERCHARGE_SPREAD
@@ -832,10 +1000,10 @@ func _ai_pass_to(target: AIPlayer) -> void:
 	# Lead a forward making a run slightly toward goal, so the ball is played into
 	# space ahead of them rather than to their feet (a through ball).
 	var spot := target.global_position
-	if target.mark_target == null and not target.is_keeper:
+	if target._is_attacker():
 		var to_goal := _goal_centre - target.global_position
 		if to_goal.length() > GOAL_MOUTH_RANGE:
-			spot += to_goal.normalized() * PASS_LEAD
+			spot += to_goal.normalized() * _tactics().pass_lead
 	var dir := (spot - global_position).normalized()
 	is_carrying  = false
 	_carry_timer = 0.0
@@ -1346,20 +1514,77 @@ func _force_drop() -> void:
 		ball.velocity   = Vector2.ZERO
 
 
+## Seek a point, steering around any body in the way (see _avoid_offset) so movers
+## arc past each other instead of jamming up. The carrier bypasses this and drives
+## its context-steered heading through _move_dir directly.
 func _move_toward(target: Vector2, speed: float, delta: float) -> void:
 	# Mid-dash, an AI bursts straight along its locked dash direction (the human
 	# dash is driven separately in _process_human_movement).
 	if _dash_time > 0.0:
+		_move_dir(_dash_dir, speed, delta)
+		return
+	var to_target := target - global_position
+	var dist := to_target.length()
+	if dist < 10.0:
+		velocity = velocity.lerp(Vector2.ZERO, DECEL * delta)
+		return
+	var dir := to_target / dist
+	# Avoid bodies *between* us and the target, but not the body sitting at the
+	# target itself — otherwise a defender chasing a carrier would steer off it and
+	# never close for the tackle.
+	_move_dir(dir + _avoid_offset(dir, dist - PLAYER_RADIUS * 2.0), speed, delta)
+
+
+## Low-level drive: accelerate toward `dir` (any length) at `speed`, updating
+## facing. A mid-dash burst overrides with the locked dash direction. This is the
+## one place velocity/facing are set for AI movement — both _move_toward and the
+## carrier's context-steered drive route through here.
+func _move_dir(dir: Vector2, speed: float, delta: float) -> void:
+	if _dash_time > 0.0:
 		facing   = _dash_dir
 		velocity = velocity.lerp(_dash_dir * DASH_SPEED, DASH_ACCEL * delta)
 		return
-	var dir := target - global_position
-	if dir.length() < 10.0:
+	if dir.length() < 0.01:
 		velocity = velocity.lerp(Vector2.ZERO, DECEL * delta)
 		return
-	dir    = dir.normalized()
-	facing = dir
+	dir      = dir.normalized()
+	facing   = dir
 	velocity = velocity.lerp(dir * speed, ACCEL * delta)
+
+
+## A steering nudge that pushes `desired_dir` laterally around bodies sitting ahead
+## of it within AVOID_RADIUS — the open side gets picked, so the player arcs past
+## traffic rather than running into it. Considers both teams; the keeper opts out
+## (it must hold a precise goal line). Bodies further along the heading than
+## `max_along` are ignored (the target we're seeking shouldn't be avoided). Returns
+## a vector to add to the heading.
+func _avoid_offset(desired_dir: Vector2, max_along: float = INF) -> Vector2:
+	if is_keeper:
+		return Vector2.ZERO
+	var strength := AVOID_STRENGTH * _tactics().avoidance_strength
+	if strength <= 0.0 or desired_dir.length() < 0.01:
+		return Vector2.ZERO
+	var push := Vector2.ZERO
+	for arr in [enemies, teammates]:
+		for n in arr:
+			var a := n as AIPlayer
+			if a == self:
+				continue
+			var rel := a.global_position - global_position
+			var d := rel.length()
+			if d < 0.01 or d > AVOID_RADIUS:
+				continue
+			var along := rel.dot(desired_dir)
+			if along <= 0.0 or along >= max_along:
+				continue   # beside/behind our heading, or at/past the target — not in the way
+			var lateral := rel - desired_dir * along
+			var side: Vector2
+			if lateral.length() > 1.0:
+				side = -lateral.normalized()                        # steer to the open side
+			else:
+				side = Vector2(-desired_dir.y, desired_dir.x)        # dead ahead — pick a side
+			push += side * (1.0 - d / AVOID_RADIUS)                 # closer = stronger
+	return push * strength
 
 
 # ── Rendering ─────────────────────────────────────────────────────────────────

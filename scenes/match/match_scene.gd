@@ -198,6 +198,12 @@ var _team_a: Array = []   # Array[AIPlayer]
 var _team_b: Array = []   # Array[AIPlayer]
 var _controlled: AIPlayer = null
 
+# Per-team tactics profiles. Quick Play uses the baseline default for both; career
+# mode will later supply each club's own profile here. Passed to every AIPlayer on
+# spawn so behaviour is driven by data, not baked constants.
+var _tactics_a: TacticsData = TacticsData.new()
+var _tactics_b: TacticsData = TacticsData.new()
+
 # Player switching. switch_player takes the Team A player nearest the ball (or the
 # opposition carrier), then repeated presses within SWITCH_CYCLE_TIME step out to the
 # next-nearest. A right-stick flick instead grabs the nearest player in that direction.
@@ -327,6 +333,7 @@ func _spawn_team(team_id: int, positions: Array, roster: Array) -> void:
 		ai.jersey  = i + 1   # 1 = GK … 15 = full forward (see formation arrays)
 		ai.is_keeper = i == 0   # roster index 0 is the goalkeeper
 		ai.ball    = _ball
+		ai.tactics = _tactics_a if team_id == 0 else _tactics_b
 		var shape  := CollisionShape2D.new()
 		var circle := CircleShape2D.new()
 		circle.radius = AIPlayer.PLAYER_RADIUS
