@@ -17,10 +17,11 @@ const C_POSS_HOME := Color(0.40, 0.62, 1.0)
 const C_POSS_AWAY := Color(1.0, 0.42, 0.42)
 const C_POSS_NONE := Color(0.8, 0.8, 0.8)
 
-# Stamina bar (bottom-left) — track + fill ColorRects, built in code.
-const STAMINA_W := 200.0
-const STAMINA_H := 16.0
-var _stamina_fill: ColorRect = null
+# Per-seat player panels (bottom-left, stacked) — colour-coded label + stamina
+# bar per human seat, so players can be told apart. Built by setup_player_hud.
+const PHUD_W     := 168.0
+const PHUD_BAR_H := 14.0
+var _player_panels: Array = []   # [{root: Control, fill: ColorRect}]
 
 # Minimap (bottom-right).
 const MINIMAP_W := 240.0
@@ -52,7 +53,6 @@ func _ready() -> void:
 	_setup_status_label()
 	_setup_tackle_meter()
 	_setup_possession()
-	_setup_stamina_bar()
 	_setup_card()
 
 
@@ -241,52 +241,65 @@ func set_possession(team: int) -> void:
 			_poss_label.add_theme_color_override("font_color", C_POSS_NONE)
 
 
-# ── Stamina bar ──────────────────────────────────────────────────────────────--
+# ── Per-seat player panels (stamina + colour) ─────────────────────────────────--
 
-func _setup_stamina_bar() -> void:
-	var root := Control.new()
-	root.layout_mode   = 1
-	root.anchor_top    = 1.0
-	root.anchor_bottom = 1.0
-	root.offset_left   = 18.0
-	root.offset_right  = 18.0 + STAMINA_W
-	root.offset_top    = -40.0
-	root.offset_bottom = -40.0 + STAMINA_H
-	root.mouse_filter  = Control.MOUSE_FILTER_IGNORE
+## Build one bottom-left panel per human seat: a colour-coded label (matching the
+## player's on-pitch selection marker) over a stamina bar. `slots` is the match
+## scene's Array[PlayerInput]; each must expose label, team and marker_color.
+func setup_player_hud(slots: Array) -> void:
+	for p in _player_panels:
+		if is_instance_valid(p["root"]):
+			p["root"].queue_free()
+	_player_panels.clear()
+	for i in slots.size():
+		var slot = slots[i]
+		var root := Control.new()
+		root.layout_mode   = 1
+		root.anchor_top    = 1.0
+		root.anchor_bottom = 1.0
+		root.offset_left   = 18.0
+		root.offset_right  = 18.0 + PHUD_W
+		var y := -40.0 - i * 44.0
+		root.offset_top    = y
+		root.offset_bottom = y + 34.0
+		root.mouse_filter  = Control.MOUSE_FILTER_IGNORE
 
-	var label := Label.new()
-	label.text = "STAMINA"
-	label.add_theme_font_size_override("font_size", 12)
-	label.add_theme_color_override("font_color", Color(0.85, 0.85, 0.85))
-	label.position = Vector2(0.0, -18.0)
-	root.add_child(label)
+		var label := Label.new()
+		label.text = "%s  %s" % [slot.label, "HOME" if slot.team == 0 else "AWAY"]
+		label.add_theme_font_size_override("font_size", 12)
+		label.add_theme_color_override("font_color", slot.marker_color)
+		label.position = Vector2(0.0, -2.0)
+		root.add_child(label)
 
-	var track := ColorRect.new()
-	track.color = Color(0.05, 0.05, 0.07, 0.85)
-	track.set_anchors_preset(Control.PRESET_FULL_RECT)
-	root.add_child(track)
+		var track := ColorRect.new()
+		track.color    = Color(0.05, 0.05, 0.07, 0.85)
+		track.position = Vector2(0.0, 16.0)
+		track.size     = Vector2(PHUD_W, PHUD_BAR_H)
+		root.add_child(track)
 
-	_stamina_fill = ColorRect.new()
-	_stamina_fill.position = Vector2(2.0, 2.0)
-	_stamina_fill.size     = Vector2(STAMINA_W - 4.0, STAMINA_H - 4.0)
-	_stamina_fill.color    = Color(0.30, 0.85, 0.40)
-	root.add_child(_stamina_fill)
+		var fill := ColorRect.new()
+		fill.position = Vector2(2.0, 18.0)
+		fill.size     = Vector2(PHUD_W - 4.0, PHUD_BAR_H - 4.0)
+		fill.color    = Color(0.30, 0.85, 0.40)
+		root.add_child(fill)
 
-	$UIRoot.add_child(root)
+		$UIRoot.add_child(root)
+		_player_panels.append({"root": root, "fill": fill})
 
 
-## Set the current player's stamina (0..1). Bar shrinks and shifts green→red.
-func set_stamina(value: float) -> void:
-	if _stamina_fill == null:
+## Set a seat's stamina (0..1). Bar shrinks and shifts green→amber→red.
+func set_player_stamina(index: int, value: float) -> void:
+	if index < 0 or index >= _player_panels.size():
 		return
+	var fill: ColorRect = _player_panels[index]["fill"]
 	var v := clampf(value, 0.0, 1.0)
-	_stamina_fill.size.x = (STAMINA_W - 4.0) * v
+	fill.size.x = (PHUD_W - 4.0) * v
 	if v > 0.5:
-		_stamina_fill.color = Color(0.30, 0.85, 0.40)        # green
+		fill.color = Color(0.30, 0.85, 0.40)        # green
 	elif v > 0.2:
-		_stamina_fill.color = Color(0.95, 0.78, 0.20)        # amber
+		fill.color = Color(0.95, 0.78, 0.20)        # amber
 	else:
-		_stamina_fill.color = Color(0.90, 0.30, 0.25)        # red
+		fill.color = Color(0.90, 0.30, 0.25)        # red
 
 
 # ── Minimap ──────────────────────────────────────────────────────────────────--

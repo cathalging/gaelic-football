@@ -10,6 +10,10 @@ extends CharacterBody2D
 ## match_scene sets is_ball_chaser on exactly one AI per team each frame.
 
 signal foul_committed(position: Vector2, team: int)
+## Emitted when this player completes a pass (hand or kick) to a teammate — not a
+## shot. The match scene uses it to hand control of the receiver to another human
+## on the team (the turn-based give-and-go when two humans share a side).
+signal passed(by: AIPlayer)
 
 enum State { IDLE, MOVE_TO_BALL, CHASE }
 
@@ -212,9 +216,20 @@ var home_position := Vector2.ZERO
 ## Set by match_scene each frame — true for exactly one AI per team.
 var is_ball_chaser      := false
 var is_human_controlled := false
-var is_selected         := false  # draw the yellow selection marker
+var is_selected         := false  # draw the selection marker
+## Colour of this player's selection marker — set per human seat so two players on
+## one team can be told apart. Defaults to the classic yellow for AI / unassigned.
+var marker_color: Color = C_MARKER
 
-## Set by match_scene during a set-piece — the player holds position (no movement).
+## The input source driving this player when human-controlled — one per human
+## seat, routed to a single device (see PlayerInput). null for AI players. Set by
+## match_scene alongside is_human_controlled; all human input reads go through it
+## instead of the global Input singleton, so each seat drives only its own player.
+var input: PlayerInput = null
+
+## Set by match_scene to hold a player still: the taker of a set piece (holding the
+## ball on the spot until they kick) and everyone during a tackle contest. Other
+## players are left unfrozen during a set piece so they can move and make runs.
 var frozen := false
 
 ## Set by match_scene during the slow-motion goal replay — the player suspends all
@@ -251,11 +266,6 @@ var is_set_piece_taker := false
 var state   := State.IDLE
 var facing  := Vector2.LEFT
 var aim_dir := Vector2.LEFT   # updated in _update_aim when human-controlled
-
-# Tracks the input device last actually used, so aim mode follows what the
-# player is doing — not merely whether a controller happens to be connected.
-var _using_controller := false
-const _JOY_AIM_DEADZONE := 0.5
 
 var is_carrying := false
 var steps_taken := 0.0
@@ -1127,11 +1137,11 @@ func _nearest_enemy_to(pos: Vector2) -> float:
 # ── Human-controlled input ────────────────────────────────────────────────────
 
 func _update_aim() -> void:
-	# Controller: the ball goes the way the player is facing (per the design doc).
-	if _using_controller:
+	# Joypad seat: the ball goes the way the player is facing (per the design doc).
+	if input == null or not input.is_keyboard:
 		aim_dir = facing
 		return
-	# Keyboard + mouse: aim toward the mouse cursor.
+	# Keyboard + mouse seat: aim toward the mouse cursor.
 	var to_mouse := get_global_mouse_position() - global_position
 	if to_mouse.length() > 12.0:
 		aim_dir = to_mouse.normalized()
@@ -1140,41 +1150,24 @@ func _update_aim() -> void:
 
 
 ## A frozen set-piece taker can't run, but may spin on the spot to choose a
-## direction. On a controller the movement input turns the player (aim follows
-## facing); with mouse aim this does nothing — the cursor already steers the kick.
+## direction. On a joypad seat the movement input turns the player (aim follows
+## facing); the keyboard seat aims with the mouse, so this does nothing — the
+## cursor already steers the kick.
 func _aim_in_place() -> void:
-	if not _using_controller:
+	if input == null or input.is_keyboard:
 		return
-	var dir := Input.get_vector("move_left", "move_right", "move_up", "move_down")
+	var dir := input.move_vector()
 	if dir != Vector2.ZERO:
 		facing = dir.normalized()
 
 
-## Switch aim mode based on the device the player is actually using, rather than
-## whichever devices are connected. A controller button or a deliberate stick
-## push selects controller aim (face direction); mouse/keyboard input switches
-## back to cursor aim.
-func _unhandled_input(event: InputEvent) -> void:
-	if not is_human_controlled:
-		return
-	if event is InputEventJoypadButton:
-		_using_controller = true
-	elif event is InputEventJoypadMotion:
-		if absf(event.axis_value) > _JOY_AIM_DEADZONE:
-			_using_controller = true
-	elif event is InputEventMouseMotion \
-			or event is InputEventMouseButton \
-			or event is InputEventKey:
-		_using_controller = false
-
-
 func _process_human_movement(delta: float) -> void:
-	var dir := Input.get_vector("move_left", "move_right", "move_up", "move_down")
+	var dir := input.move_vector() if input != null else Vector2.ZERO
 
 	# Dash is a short burst of speed, then a cooldown. Trial: available to any
 	# controlled player (attacker or defender), not just the ball carrier. The
 	# dash-ready ring (see _draw) shows when it's available.
-	if Input.is_action_just_pressed("sprint") \
+	if input != null and input.just_pressed("sprint") \
 			and _dash_cd <= 0.0 and _dash_time <= 0.0 and stamina >= DASH_MIN_STAMINA:
 		_dash_time = DASH_DURATION
 		_dash_cd   = DASH_COOLDOWN
@@ -1186,7 +1179,7 @@ func _process_human_movement(delta: float) -> void:
 	# Jockey / contain — hold to shadow the carrier at a controlled (slower) speed
 	# without the ball, keeping square to them so the next tackle commits from the
 	# front. Defending is then about positioning, not raw pace.
-	_jockeying = Input.is_action_pressed("jockey") and not is_carrying
+	_jockeying = input != null and input.pressed("jockey") and not is_carrying
 
 	if _dash_time > 0.0:
 		facing   = _dash_dir
@@ -1259,17 +1252,17 @@ func _process_human_actions(delta: float) -> void:
 
 	# First-time strike — pressing shoot with no ball but one right beside you
 	# volleys it goalward rather than gathering it first.
-	if not is_carrying and Input.is_action_just_pressed("shoot"):
+	if not is_carrying and input != null and input.just_pressed("shoot"):
 		_try_first_time_shot()
 
 	# SOLO — resets step counter (unlimited), but briefly checks your stride.
-	if Input.is_action_just_pressed("solo") and is_carrying:
+	if input != null and input.just_pressed("solo") and is_carrying:
 		steps_taken = 0.0
 		_solo_slow  = SOLO_SLOW_DURATION
 
 	# BOUNCE / hop — resets step counter (once per possession), no speed cost, so
 	# running and hopping keeps you gliding past a chaser.
-	if Input.is_action_just_pressed("bounce") and is_carrying and not has_bounced:
+	if input != null and input.just_pressed("bounce") and is_carrying and not has_bounced:
 		has_bounced = true
 		steps_taken = 0.0
 
@@ -1284,11 +1277,13 @@ func _human_hand_pass() -> void:
 		_shoot_ball(aim_dir, 0.5, true)
 		return
 	ball.release_hand_pass(aim_dir)
+	passed.emit(self)
 
 
 func _human_kick_pass(power: float) -> void:
 	is_carrying = false
 	ball.release_kick_pass(aim_dir, power)
+	passed.emit(self)
 
 
 func _human_shoot(power: float, is_goal: bool) -> void:
@@ -1317,13 +1312,13 @@ func _try_first_time_shot() -> void:
 ##  • Single tap → hand pass (short, flat).
 ##  • Double-tap, holding the second press → kick pass, power from that hold.
 func _process_pass(delta: float) -> void:
-	if not is_carrying:
+	if not is_carrying or input == null:
 		_pass_phase = 0
 		return
-	var pressed := Input.is_action_pressed("pass")
+	var pressed := input.pressed("pass")
 	match _pass_phase:
 		0:
-			if Input.is_action_just_pressed("pass"):
+			if input.just_pressed("pass"):
 				_pass_phase  = 1
 				_pass_held_t = 0.0
 		1:
@@ -1337,7 +1332,7 @@ func _process_pass(delta: float) -> void:
 				_fire_hand_pass()
 		2:
 			_pass_wait_t += delta
-			if Input.is_action_just_pressed("pass"):
+			if input.just_pressed("pass"):
 				_pass_phase  = 3   # second press → kick pass
 				_pass_held_t = 0.0
 			elif _pass_wait_t >= SHOOT_DOUBLE_TAP:
@@ -1366,13 +1361,13 @@ func _fire_kick_pass(power: float) -> void:
 ##  • Hold the button once → point attempt (over the bar), power from hold time.
 ##  • Double-tap, holding the second press → goal attempt, power from that hold.
 func _process_shoot(delta: float) -> void:
-	if not is_carrying:
+	if not is_carrying or input == null:
 		_shoot_phase = 0
 		return
-	var pressed := Input.is_action_pressed("shoot")
+	var pressed := input.pressed("shoot")
 	match _shoot_phase:
 		0:
-			if Input.is_action_just_pressed("shoot"):
+			if input.just_pressed("shoot"):
 				_shoot_phase  = 1
 				_shoot_held_t = 0.0
 		1:
@@ -1387,7 +1382,7 @@ func _process_shoot(delta: float) -> void:
 				_shoot_phase = 4
 		2:
 			_shoot_wait_t += delta
-			if Input.is_action_just_pressed("shoot"):
+			if input.just_pressed("shoot"):
 				_shoot_phase  = 3   # second press → goal attempt
 				_shoot_held_t = 0.0
 			elif _shoot_wait_t >= SHOOT_DOUBLE_TAP:
@@ -1634,7 +1629,7 @@ func _draw() -> void:
 		var tip   := Vector2(0.0, SEL_Y)
 		var left  := tip + Vector2(-7.0, -13.0)
 		var right := tip + Vector2( 7.0, -13.0)
-		draw_colored_polygon(PackedVector2Array([left, right, tip]), C_MARKER)
+		draw_colored_polygon(PackedVector2Array([left, right, tip]), marker_color)
 	if _stun_timer > 0.0:
 		_draw_stun_stars()
 	if is_human_controlled:

@@ -16,6 +16,7 @@ enum State {
 	MANAGER_CAREER,
 	PLAYER_CAREER,
 	MATCH,
+	MATCH_SETUP,
 	SETTINGS,
 	TUTORIAL,
 }
@@ -28,14 +29,21 @@ enum CareerMode {
 	PLAYER,
 }
 
-const SCENE_MAIN_MENU := "res://ui/main_menu/main_menu.tscn"
-const SCENE_SETTINGS  := "res://ui/settings/settings.tscn"
-const SCENE_TUTORIAL  := "res://ui/tutorial/tutorial.tscn"
-const SCENE_MATCH     := "res://scenes/match/MatchScene.tscn"
+const SCENE_MAIN_MENU   := "res://ui/main_menu/main_menu.tscn"
+const SCENE_SETTINGS    := "res://ui/settings/settings.tscn"
+const SCENE_TUTORIAL    := "res://ui/tutorial/tutorial.tscn"
+const SCENE_MATCH       := "res://scenes/match/MatchScene.tscn"
+const SCENE_MATCH_SETUP := "res://ui/match_setup/match_setup.tscn"
 # const SCENE_MANAGER_HUB := "res://scenes/manager/manager_hub.tscn"
 
 var current_state: State = State.BOOT
 var career_mode: CareerMode = CareerMode.NONE
+
+## The setup for the match about to be played (single/multiplayer + the seat of
+## every human). Built by the match-setup lobby and read by the match scene on
+## load. Defaults to a plain single-player game so the match scene is runnable
+## even if opened directly (isolated testing).
+var match_config: MatchConfig = MatchConfig.single_player()
 
 
 func _ready() -> void:
@@ -58,9 +66,25 @@ func start_player_career() -> void:
 	_set_state(State.PLAYER_CAREER)
 
 
-## Jump straight into a match with no career context. Development shortcut only.
+## Quick Play now routes through the match-setup lobby (single/multiplayer +
+## seat assignment) rather than dropping straight into the match. Development
+## shortcut only — no career context.
 func start_quick_play() -> void:
 	career_mode = CareerMode.NONE
+	open_match_setup()
+
+
+## Open the pre-match setup lobby (choose single/multiplayer and seat the human
+## players). The lobby builds a MatchConfig and calls start_match() to launch.
+func open_match_setup() -> void:
+	_set_state(State.MATCH_SETUP)
+	change_scene(SCENE_MATCH_SETUP)
+
+
+## Launch the match with the given setup. The match scene reads match_config on
+## load and spawns one PlayerInput per seat. Called by the setup lobby.
+func start_match(config: MatchConfig) -> void:
+	match_config = config if config != null else MatchConfig.single_player()
 	_set_state(State.MATCH)
 	change_scene(SCENE_MATCH)
 

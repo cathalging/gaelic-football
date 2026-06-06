@@ -1,0 +1,95 @@
+[gd_scene format=3]
+
+[ext_resource type="Script" path="res://ui/match_setup/match_setup.gd" id="1_setup"]
+
+[node name="MatchSetup" type="Control"]
+layout_mode = 3
+anchors_preset = 15
+anchor_right = 1.0
+anchor_bottom = 1.0
+grow_horizontal = 2
+grow_vertical = 2
+script = ExtResource("1_setup")
+
+[node name="CenterContainer" type="CenterContainer" parent="."]
+layout_mode = 1
+anchors_preset = 15
+anchor_right = 1.0
+anchor_bottom = 1.0
+grow_horizontal = 2
+grow_vertical = 2
+
+[node name="Root" type="VBoxContainer" parent="CenterContainer"]
+layout_mode = 2
+theme_override_constants/separation = 24
+
+[node name="Title" type="Label" parent="CenterContainer/Root"]
+unique_name_in_owner = true
+layout_mode = 2
+text = "QUICK PLAY"
+horizontal_alignment = 1
+
+[node name="ModePanel" type="VBoxContainer" parent="CenterContainer/Root"]
+unique_name_in_owner = true
+layout_mode = 2
+theme_override_constants/separation = 16
+
+[node name="SingleLabel" type="Label" parent="CenterContainer/Root/ModePanel"]
+layout_mode = 2
+text = "SINGLE PLAYER       A  /  Enter"
+horizontal_alignment = 1
+
+[node name="MultiLabel" type="Label" parent="CenterContainer/Root/ModePanel"]
+layout_mode = 2
+text = "MULTIPLAYER         X  /  M"
+horizontal_alignment = 1
+
+[node name="TeamsPanel" type="VBoxContainer" parent="CenterContainer/Root"]
+unique_name_in_owner = true
+visible = false
+layout_mode = 2
+theme_override_constants/separation = 24
+
+[node name="TeamsTitle" type="Label" parent="CenterContainer/Root/TeamsPanel"]
+layout_mode = 2
+text = "CHOOSE YOUR TEAM"
+horizontal_alignment = 1
+
+[node name="Teams" type="HBoxContainer" parent="CenterContainer/Root/TeamsPanel"]
+layout_mode = 2
+theme_override_constants/separation = 64
+
+[node name="HomePanel" type="VBoxContainer" parent="CenterContainer/Root/TeamsPanel/Teams"]
+custom_minimum_size = Vector2(320, 280)
+layout_mode = 2
+theme_override_constants/separation = 8
+
+[node name="HomeTitle" type="Label" parent="CenterContainer/Root/TeamsPanel/Teams/HomePanel"]
+layout_mode = 2
+text = "HOME"
+horizontal_alignment = 1
+
+[node name="HomeList" type="VBoxContainer" parent="CenterContainer/Root/TeamsPanel/Teams/HomePanel"]
+unique_name_in_owner = true
+layout_mode = 2
+theme_override_constants/separation = 6
+
+[node name="AwayPanel" type="VBoxContainer" parent="CenterContainer/Root/TeamsPanel/Teams"]
+custom_minimum_size = Vector2(320, 280)
+layout_mode = 2
+theme_override_constants/separation = 8
+
+[node name="AwayTitle" type="Label" parent="CenterContainer/Root/TeamsPanel/Teams/AwayPanel"]
+layout_mode = 2
+text = "AWAY"
+horizontal_alignment = 1
+
+[node name="AwayList" type="VBoxContainer" parent="CenterContainer/Root/TeamsPanel/Teams/AwayPanel"]
+unique_name_in_owner = true
+layout_mode = 2
+theme_override_constants/separation = 6
+
+[node name="Hint" type="Label" parent="CenterContainer/Root"]
+unique_name_in_owner = true
+layout_mode = 2
+horizontal_alignment = 1

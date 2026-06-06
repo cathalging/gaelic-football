@@ -192,11 +192,33 @@ const _TEAM_B_POSITIONS: Array = [
 	Vector2(-490.0,  180.0),   # Full forward R
 ]
 
-const _INITIAL_CONTROLLED := 7   # Team A midfielder L
+# Where each team's human seats start: outfield slots handed out in this order
+# (midfielders, then half-forwards, then half-backs) — never the keeper.
+const _HUMAN_START_SLOTS: Array[int] = [7, 8, 10, 9, 11, 5, 4, 6]
+
+# Per-seat marker colours (and HUD accents), chosen to read clearly against both
+# kits (blue / red) and each other. Seat i uses SEAT_COLORS[i].
+const SEAT_COLORS: Array[Color] = [
+	Color(0.20, 0.92, 0.95),   # P1 — cyan
+	Color(1.00, 0.85, 0.15),   # P2 — yellow
+	Color(0.95, 0.35, 0.85),   # P3 — magenta
+	Color(0.55, 0.95, 0.35),   # P4 — lime
+]
 
 var _team_a: Array = []   # Array[AIPlayer]
 var _team_b: Array = []   # Array[AIPlayer]
-var _controlled: AIPlayer = null
+
+# One PlayerInput per human seat (built from GameManager.match_config), each
+# driving the AIPlayer it controls. Empty = an all-AI exhibition. Seat 0 is the
+# "primary" seat the shared HUD power bar / stamina readout follows.
+var _slots: Array = []   # Array[PlayerInput]
+
+# Turn-based give-and-go: the last human passer and their team. When a teammate
+# next gathers the pass, control of the receiver is handed to a different human
+# on that team (or back to the passer if they're the only human). Cleared once
+# the handoff resolves. See _on_player_passed / _update_human_assignment.
+var _last_pass_passer: AIPlayer = null
+var _last_pass_team := -1
 
 # Per-team tactics profiles. Quick Play uses the baseline default for both; career
 # mode will later supply each club's own profile here. Passed to every AIPlayer on
@@ -204,16 +226,14 @@ var _controlled: AIPlayer = null
 var _tactics_a: TacticsData = TacticsData.new()
 var _tactics_b: TacticsData = TacticsData.new()
 
-# Player switching. switch_player takes the Team A player nearest the ball (or the
-# opposition carrier), then repeated presses within SWITCH_CYCLE_TIME step out to the
-# next-nearest. A right-stick flick instead grabs the nearest player in that direction.
+# Player switching. switch_player takes the seat's teammate nearest the ball (or
+# the opposition carrier), skipping any player another human already controls;
+# repeated presses within SWITCH_CYCLE_TIME step out to the next-nearest. A
+# right-stick flick instead grabs the nearest player in that direction. The cycle
+# state lives per seat on the PlayerInput.
 const SWITCH_CYCLE_TIME := 1.3
-var _switch_cycle: Array = []   # Array[AIPlayer] — the current shortlist
-var _switch_index := 0
-var _switch_timer := 0.0
 const RS_FLICK_ON  := 0.6       # right-stick magnitude that registers a flick
 const RS_FLICK_OFF := 0.3       # must fall below this before another flick fires
-var _rs_ready := true
 
 
 func _ready() -> void:
@@ -229,6 +249,7 @@ func _ready() -> void:
 	# raised directly by the tackle resolution in this script (see _on_tackle_foul).
 	for ai in _team_a + _team_b:
 		(ai as AIPlayer).foul_committed.connect(_on_foul)
+		(ai as AIPlayer).passed.connect(_on_player_passed)
 
 	# Seeded RNG for AI tackle resolution — avoids global randf() so the live
 	# scene stays reproducible from a fixed seed (see CLAUDE.md determinism rules).
@@ -237,9 +258,7 @@ func _ready() -> void:
 	# never perturbs the seeded simulation rolls above.
 	_fx_rng.randomize()
 
-	_controlled = _team_a[_INITIAL_CONTROLLED] as AIPlayer
-	_controlled.is_human_controlled = true
-	_controlled.is_selected         = true
+	_setup_slots()
 
 	_setup_wind()
 
@@ -263,15 +282,16 @@ func _setup_wind() -> void:
 
 
 func _unhandled_input(event: InputEvent) -> void:
+	# Pause from any device returns to the menu. Per-seat switch and tackle are
+	# polled per device in _poll_seat_actions so each player drives only their own.
 	if event.is_action_pressed("pause"):
 		GameManager.return_to_main_menu()
-	if event.is_action_pressed("switch_player"):
-		_switch_player()
-	if event.is_action_pressed("tackle"):
-		_on_tackle_pressed()
 
 
 func _physics_process(delta: float) -> void:
+	# Per-seat switch / tackle / flick — polled first so a tackle press can strike
+	# an active contest (the handler gates itself by play state).
+	_poll_seat_actions()
 	if _play_state == Play.REPLAY:
 		return
 	if _play_state == Play.SETTLE:
@@ -291,9 +311,8 @@ func _physics_process(delta: float) -> void:
 		_update_hud_indicators()
 		return
 	_record_frame()
-	_poll_switch_stick()
 	_update_ball_chasers()
-	_auto_control_carrier()
+	_update_human_assignment()
 	_ai_tackles()
 	_check_shot_block(delta)
 	_check_keeper_save()
@@ -309,7 +328,9 @@ func _physics_process(delta: float) -> void:
 
 
 func _process(delta: float) -> void:
-	_switch_timer = maxf(0.0, _switch_timer - delta)
+	for s in _slots:
+		var slot := s as PlayerInput
+		slot.switch_timer = maxf(0.0, slot.switch_timer - delta)
 	_update_shake(delta)
 	_update_camera(delta)
 	if _play_state == Play.REPLAY:
@@ -361,76 +382,136 @@ func _assign_marks() -> void:
 		(_team_b[i] as AIPlayer).mark_target = _team_a[j] as AIPlayer
 
 
-# ── Player switching ───────────────────────────────────────────────────────────
+# ── Human seats & control ──────────────────────────────────────────────────────
 
-## Switching grabs the Team A outfielder closest to the ball — or to the opposition
-## carrier, if there is one — the predictable "give me the man on the ball" pick.
-## Repeated presses within SWITCH_CYCLE_TIME step out to the next-closest, then the
-## next, so you can walk back to a covering defender if the nearest isn't the one.
-func _switch_player() -> void:
+## Build a PlayerInput per human seat from the active MatchConfig and hand each
+## one a starting outfielder on its team. With no config (isolated testing) this
+## falls back to a single keyboard seat on the home team.
+func _setup_slots() -> void:
+	var cfg: MatchConfig = GameManager.match_config
+	if cfg == null:
+		cfg = MatchConfig.single_player()
+	var used := {0: 0, 1: 0}   # next start-slot index per team
+	for i in cfg.slots.size():
+		var slot_data: MatchPlayerSlot = cfg.slots[i]
+		var pi := PlayerInput.new()
+		pi.is_keyboard   = slot_data.is_keyboard
+		pi.device        = slot_data.device_id
+		pi.team          = slot_data.team
+		pi.marker_color  = SEAT_COLORS[i % SEAT_COLORS.size()]
+		pi.label         = "P%d" % (i + 1)
+		add_child(pi)
+		var roster: Array = _team_a if slot_data.team == 0 else _team_b
+		var slot_idx: int = _HUMAN_START_SLOTS[used[slot_data.team] % _HUMAN_START_SLOTS.size()]
+		used[slot_data.team] += 1
+		_assign(pi, roster[slot_idx] as AIPlayer)
+		_slots.append(pi)
+	_hud.setup_player_hud(_slots)
+
+
+## Human seats playing for `team`, in seat order.
+func _humans_on(team: int) -> Array:
+	var out: Array = []
+	for s in _slots:
+		if (s as PlayerInput).team == team:
+			out.append(s)
+	return out
+
+
+## The seat currently controlling `player`, or null if it's AI-driven.
+func _slot_controlling(player: AIPlayer) -> PlayerInput:
+	for s in _slots:
+		if (s as PlayerInput).controlled == player:
+			return s as PlayerInput
+	return null
+
+
+## Hand `slot` control of `target`: release the seat's previous player back to AI,
+## take the target off any other seat, and wire the new one. Dash refills so a
+## switched-to player is always ready (it recovers in the background).
+func _assign(slot: PlayerInput, target: AIPlayer) -> void:
+	if target == null or slot.controlled == target:
+		return
+	if slot.controlled != null:
+		var prev := slot.controlled as AIPlayer
+		prev.is_human_controlled = false
+		prev.is_selected         = false
+		prev.input               = null
+		prev.marker_color        = AIPlayer.C_MARKER
+		prev.cancel_windup()
+	var other := _slot_controlling(target)
+	if other != null and other != slot:
+		other.controlled = null   # _ensure_seats_assigned will re-seat it next frame
+	target.is_human_controlled = true
+	target.is_selected         = true
+	target.input               = slot
+	target.marker_color        = slot.marker_color
+	target.refill_dash()
+	slot.controlled = target
+
+
+## Switching grabs the seat's teammate closest to the ball — or to the opposition
+## carrier, if there is one — skipping anyone another human already controls.
+## Repeated presses within SWITCH_CYCLE_TIME step out to the next-closest.
+func _switch_player(slot: PlayerInput) -> void:
+	if _play_state != Play.LIVE:
+		return   # control stays put during set pieces, settles, replays and contests
 	var ref_pos := _ball.global_position
-	var carrier := _opponent_carrier()
+	var carrier := _opponent_carrier_of(slot.team)
 	if carrier:
 		ref_pos = carrier.global_position
 
 	# Keep cycling the same shortlist on rapid presses; rebuild once it lapses.
-	if _switch_timer <= 0.0 or _switch_cycle.is_empty():
-		_switch_cycle = _switch_shortlist(ref_pos)
-		_switch_index = 0
-	else:
-		_switch_index = (_switch_index + 1) % _switch_cycle.size()
-	_switch_timer = SWITCH_CYCLE_TIME
-	if _switch_index < _switch_cycle.size():
-		_set_controlled(_switch_cycle[_switch_index])
+	if slot.switch_timer <= 0.0 or slot.switch_cycle.is_empty():
+		slot.switch_cycle = _switch_shortlist(slot, ref_pos)
+		slot.switch_index = 0
+	elif not slot.switch_cycle.is_empty():
+		slot.switch_index = (slot.switch_index + 1) % slot.switch_cycle.size()
+	slot.switch_timer = SWITCH_CYCLE_TIME
+	if slot.switch_index < slot.switch_cycle.size():
+		_assign(slot, slot.switch_cycle[slot.switch_index])
 
 
-## The opposing (Team B) carrier, if any.
-func _opponent_carrier() -> AIPlayer:
-	for t in _team_b:
+## The carrier on the team opposing `team`, if any.
+func _opponent_carrier_of(team: int) -> AIPlayer:
+	for t in (_team_b if team == 0 else _team_a):
 		if (t as AIPlayer).is_carrying:
 			return t as AIPlayer
 	return null
 
 
-## The Team A outfielders nearest `ref_pos`, closest first — the keeper and the
-## current player are excluded. The first switch takes the nearest; repeated presses
-## cycle out through the next few, stepping from the man on the ball outward.
-func _switch_shortlist(ref_pos: Vector2) -> Array:
+## The seat's outfielders nearest `ref_pos`, closest first — excluding the keeper,
+## the seat's current player, and anyone another human already controls (no
+## poaching another player's man).
+func _switch_shortlist(slot: PlayerInput, ref_pos: Vector2) -> Array:
 	var pool: Array = []
-	for t in _team_a:
+	for t in (_team_a if slot.team == 0 else _team_b):
 		var ai := t as AIPlayer
-		if ai != _controlled and not ai.is_keeper:
-			pool.append(ai)
+		if ai == slot.controlled or ai.is_keeper:
+			continue
+		var owner := _slot_controlling(ai)
+		if owner != null and owner != slot:
+			continue   # held by another human — off-limits
+		pool.append(ai)
 	pool.sort_custom(func(a, b):
 		return a.global_position.distance_to(ref_pos) < b.global_position.distance_to(ref_pos))
 	return pool.slice(0, 3)
 
 
-## Read the right stick; a flick switches control to the nearest Team A player in
-## roughly that direction from the current player (edge-triggered per flick).
-func _poll_switch_stick() -> void:
-	var rs := Vector2(
-		Input.get_joy_axis(0, JOY_AXIS_RIGHT_X),
-		Input.get_joy_axis(0, JOY_AXIS_RIGHT_Y))
-	var mag := rs.length()
-	if mag < RS_FLICK_OFF:
-		_rs_ready = true
+## Switch `slot` to the closest free teammate lying roughly in `dir` from the
+## seat's current player (the right-stick flick).
+func _switch_in_direction(slot: PlayerInput, dir: Vector2) -> void:
+	if slot.controlled == null:
 		return
-	if mag >= RS_FLICK_ON and _rs_ready:
-		_rs_ready = false
-		_switch_in_direction(rs.normalized())
-
-
-## Switch to the closest Team A player lying roughly in `dir` from the current one.
-func _switch_in_direction(dir: Vector2) -> void:
-	if _controlled == null:
-		return
-	var origin := _controlled.global_position
+	var origin := (slot.controlled as AIPlayer).global_position
 	var best: AIPlayer = null
 	var best_score := -INF
-	for t in _team_a:
+	for t in (_team_a if slot.team == 0 else _team_b):
 		var ai := t as AIPlayer
-		if ai == _controlled:
+		if ai == slot.controlled or ai.is_keeper:
+			continue
+		var owner := _slot_controlling(ai)
+		if owner != null and owner != slot:
 			continue
 		var off := ai.global_position - origin
 		var d := off.length()
@@ -444,30 +525,130 @@ func _switch_in_direction(dir: Vector2) -> void:
 			best_score = score
 			best       = ai
 	if best:
-		_set_controlled(best)
+		_assign(slot, best)
 
 
-## Hand human control to a specific Team A player, clearing the previous one.
-func _set_controlled(target: AIPlayer) -> void:
-	if target == _controlled:
+## Read each joypad seat's right stick for a flick-to-switch (edge-triggered),
+## and poll the switch / tackle buttons per seat. Tackle is handled in every play
+## state (the handler gates itself); switching only while play is LIVE.
+func _poll_seat_actions() -> void:
+	for s in _slots:
+		var slot := s as PlayerInput
+		if slot.just_pressed("tackle"):
+			_on_tackle_pressed(slot)
+	if _play_state != Play.LIVE or _contest_active:
 		return
-	_controlled.is_human_controlled = false
-	_controlled.is_selected         = false
-	_controlled.cancel_windup()
-	target.is_human_controlled = true
-	target.is_selected         = true
-	target.refill_dash()   # dash recovers in the background — ready on takeover
-	_controlled = target
+	for s in _slots:
+		var slot := s as PlayerInput
+		if slot.just_pressed("switch_player"):
+			_switch_player(slot)
+		var dir := slot.flick(RS_FLICK_ON, RS_FLICK_OFF)
+		if dir != Vector2.ZERO:
+			_switch_in_direction(slot, dir)
 
 
-## Whenever a Team A player wins the ball, the human takes over that carrier —
-## so possession always puts you in control of the player running with the ball.
-func _auto_control_carrier() -> void:
-	for t in _team_a:
+## A human just completed a pass — remember the passer so the receiver can be
+## handed to a different human on the team when they gather it (turn-based play).
+func _on_player_passed(by: AIPlayer) -> void:
+	_last_pass_passer = by
+	_last_pass_team   = by.team
+
+
+## Keep every team's carrier under human control where a human is available, and
+## apply the turn-based handoff: on a completed pass, the receiver goes to a human
+## other than the passer (or back to the passer if they are the only human). A
+## carrier won loose / by a tackle goes to the nearest human on the team.
+func _update_human_assignment() -> void:
+	# If the opposition gathered the ball, the pending give-and-go is void.
+	var any_carrier := _current_carrier()
+	if any_carrier != null and _last_pass_team != -1 and any_carrier.team != _last_pass_team:
+		_last_pass_passer = null
+		_last_pass_team   = -1
+	for team in [0, 1]:
+		var humans := _humans_on(team)
+		if humans.is_empty():
+			continue
+		var carrier := _team_carrier(team)
+		if carrier == null:
+			continue
+		if _slot_controlling(carrier) != null:
+			if _last_pass_team == team:
+				_last_pass_passer = null   # receiver already human-held — handoff done
+			continue
+		# Carrier is AI-driven — a human should take over.
+		var slot: PlayerInput = null
+		if _last_pass_passer != null and _last_pass_team == team and carrier != _last_pass_passer:
+			var passer_slot := _slot_controlling(_last_pass_passer)
+			slot = _other_human(humans, passer_slot)
+		else:
+			slot = _nearest_human(humans, carrier.global_position)
+		if slot != null:
+			_assign(slot, carrier)
+		_last_pass_team   = -1
+		_last_pass_passer = null
+	_ensure_seats_assigned()
+
+
+## The carrier on `team`, if any.
+func _team_carrier(team: int) -> AIPlayer:
+	for t in (_team_a if team == 0 else _team_b):
+		if (t as AIPlayer).is_carrying:
+			return t as AIPlayer
+	return null
+
+
+## Pick a human seat other than `exclude` (the give-and-go target); fall back to
+## `exclude` when it is the only human on the team.
+func _other_human(humans: Array, exclude: PlayerInput) -> PlayerInput:
+	for s in humans:
+		if s != exclude:
+			return s as PlayerInput
+	return exclude
+
+
+## The human seat whose controlled player is nearest `pos`.
+func _nearest_human(humans: Array, pos: Vector2) -> PlayerInput:
+	var best: PlayerInput = null
+	var best_d := INF
+	for s in humans:
+		var slot := s as PlayerInput
+		if slot.controlled == null:
+			return slot   # an empty seat should grab the carrier immediately
+		var d := (slot.controlled as AIPlayer).global_position.distance_to(pos)
+		if d < best_d:
+			best_d = d
+			best   = slot
+	return best
+
+
+## Make sure no seat is left controlling nothing (after a player was taken from it
+## by another seat): give it the nearest free teammate.
+func _ensure_seats_assigned() -> void:
+	for s in _slots:
+		var slot := s as PlayerInput
+		if slot.controlled != null and is_instance_valid(slot.controlled):
+			continue
+		slot.controlled = null
+		var target := _nearest_free_teammate(slot, _ball.global_position)
+		if target != null:
+			_assign(slot, target)
+
+
+## The teammate of `slot` nearest `pos` that no human controls (keeper excluded).
+func _nearest_free_teammate(slot: PlayerInput, pos: Vector2) -> AIPlayer:
+	var best: AIPlayer = null
+	var best_d := INF
+	for t in (_team_a if slot.team == 0 else _team_b):
 		var ai := t as AIPlayer
-		if ai.is_carrying and ai != _controlled:
-			_set_controlled(ai)
-			return
+		if ai.is_keeper:
+			continue
+		if _slot_controlling(ai) != null:
+			continue
+		var d := ai.global_position.distance_to(pos)
+		if d < best_d:
+			best_d = d
+			best   = ai
+	return best
 
 
 # ── Tackling ──────────────────────────────────────────────────────────────────--
@@ -480,15 +661,17 @@ func _current_carrier() -> AIPlayer:
 	return null
 
 
-## The human pressed `tackle`. Either strike the active contest, or start one
-## against an opponent carrier in reach (an illegal angle is an instant foul).
-func _on_tackle_pressed() -> void:
+## A seat pressed `tackle`. Either strike the active contest (only the seat
+## running it can), or start one against an opponent carrier in reach (an illegal
+## angle is an instant foul).
+func _on_tackle_pressed(slot: PlayerInput) -> void:
 	if _play_state != Play.LIVE:
 		return
 	if _contest_active:
-		_resolve_human_contest()
+		if slot.controlled == _contest_defender:
+			_resolve_human_contest()
 		return
-	var defender := _controlled
+	var defender := slot.controlled as AIPlayer
 	if defender == null or not defender.can_tackle():
 		return
 	var victim := _current_carrier()
@@ -1007,8 +1190,13 @@ func _on_half_over() -> void:
 # ── HUD updates ────────────────────────────────────────────────────────────────
 
 func _update_power_bar() -> void:
-	if _controlled and _controlled.is_human_controlled:
-		var p := _controlled.windup_power()
+	# The centre power bar follows whichever seat is currently winding up a kick
+	# (only one player ever charges at a time with a single ball).
+	for s in _slots:
+		var c := (s as PlayerInput).controlled as AIPlayer
+		if c == null:
+			continue
+		var p := c.windup_power()
 		if p >= 0.0:
 			_hud.set_power(p)
 			return
@@ -1019,8 +1207,11 @@ func _update_power_bar() -> void:
 ## and mark it with a white cross on the ground (see Ball.show_landing). Cleared the
 ## instant the wind-up ends, so the marker only ever shows during a power-up.
 func _update_landing_indicator() -> void:
-	if _controlled and _controlled.is_human_controlled:
-		var shot: Dictionary = _controlled.windup_shot()
+	for s in _slots:
+		var c := (s as PlayerInput).controlled as AIPlayer
+		if c == null:
+			continue
+		var shot: Dictionary = c.windup_shot()
 		if shot.get("active", false):
 			_ball.landing_target = _predicted_landing(shot)
 			if not _ball.show_landing:
@@ -1163,7 +1354,7 @@ func _award_kickout(team: int) -> void:
 	# The conceding/defending keeper restarts from their small square.
 	var roster: Array = _team_a if team == 0 else _team_b
 	var keeper := roster[0] as AIPlayer
-	_award_set_piece("Kickout", keeper.home_position, keeper)
+	_award_set_piece("Kickout", keeper.home_position, keeper, true)
 	# Arm the mark: the first clean catch beyond the 45 wins a free. Set after the
 	# set-piece call, which clears any previous pending mark.
 	_kickout_pending = true
@@ -1180,14 +1371,17 @@ func _award_square_ball(defending_team: int) -> void:
 
 # ── Set-piece framework ─────────────────────────────────────────────────────--
 
-## Stop play, place the ball with `taker`, freeze everyone, and force the
-## opposition to stand back. The taker then holds the ball until they kick it:
+## Stop play, place the ball with `taker`, and force the opposition to stand
+## back. Only the taker is frozen (holding the spot); everyone else is free to
+## move and make runs, but no one can win the ball until the kick (chasers and
+## tackles are off). The taker then holds the ball until they kick it:
 ##  • human's team → control is handed over and the kick is armed immediately, so
 ##    there is no enforced wait — aim & kick in your own time;
 ##  • opposition   → the AI waits AI_SET_PIECE_DELAY (so you get a beat to react),
 ##    then takes the kick.
-## Play resumes (everyone unfreezes) the moment the taker releases the ball.
-func _award_set_piece(label: String, spot: Vector2, taker: AIPlayer) -> void:
+## Pass `reset_home` (kickouts) to snap both teams back to their formation spots
+## first. Play resumes the moment the taker releases the ball.
+func _award_set_piece(label: String, spot: Vector2, taker: AIPlayer, reset_home: bool = false) -> void:
 	if _contest_active:
 		_end_human_contest()   # a whistle ends any in-progress tackle contest
 	# Any whistle ends a running advantage and clears a pending mark.
@@ -1196,22 +1390,34 @@ func _award_set_piece(label: String, spot: Vector2, taker: AIPlayer) -> void:
 	_play_state   = Play.SET_PIECE
 	_sp_timer     = 0.0
 	# No countdown for a human taker; the AI waits a beat before kicking.
-	_sp_countdown = 0.0 if taker.team == 0 else AI_SET_PIECE_DELAY
+	var human_team := not _humans_on(taker.team).is_empty()
+	_sp_countdown = 0.0 if human_team else AI_SET_PIECE_DELAY
 	_sp_taker     = taker
 	_sp_label     = label
 
+	# Everyone but the taker is released so both teams can set up and make runs
+	# during the dead ball instead of standing frozen. Nobody may win the ball,
+	# though: ball-chasers are cleared (no one presses), tackles are gated to
+	# LIVE play, and the ball stays glued to the taker until they kick it.
 	for t in _team_a + _team_b:
 		var ai := t as AIPlayer
 		ai.cancel_windup()
 		ai.is_carrying        = false
 		ai.is_set_piece_taker = false
 		ai.set_piece_locked   = false
-		ai.frozen             = true
+		ai.is_ball_chaser     = false
+		ai.frozen             = false
+
+	# A kickout resets both teams to their formation starting spots, so play
+	# restarts from a clean shape rather than wherever the last passage ended.
+	if reset_home:
+		_reset_to_home_positions()
 
 	taker.global_position = spot
 	_give_ball_to(taker, spot)
 	taker.is_set_piece_taker = true
 	taker.set_piece_locked   = true   # can aim during the countdown, but not yet kick
+	taker.frozen             = true   # the taker holds the spot until they release it
 
 	# Opposition must retreat the regulation distance from the ball.
 	_push_opponents_back(taker.team, spot)
@@ -1220,9 +1426,9 @@ func _award_set_piece(label: String, spot: Vector2, taker: AIPlayer) -> void:
 	# free — is nudged off instead of jittering against the taker's body.
 	_separate_from_taker(taker)
 
-	if taker.team == 0:
-		# Player's own restart — hand them control and arm it immediately so there
-		# is no enforced wait before they can aim and kick.
+	if human_team:
+		# A human team's restart — hand a seat control of the taker and arm it
+		# immediately so there is no enforced wait before they can aim and kick.
 		_set_set_piece_controller(taker)
 		_arm_set_piece()
 	else:
@@ -1240,6 +1446,11 @@ func _tick_set_piece(delta: float) -> void:
 	# Ball._physics_process, which also runs, but this guards placement).
 	if _sp_taker.is_carrying:
 		_ball.global_position = _sp_taker.global_position
+
+	# The opposition may move and make runs, but never inside the regulation
+	# distance — hold them out each frame so no one creeps onto the ball before
+	# it is kicked (and the human can't park a defender on the taker).
+	_push_opponents_back(_sp_taker.team, _sp_taker.global_position)
 
 	# Phase 1 — the ball is placed and a 3-second countdown runs. Nobody may act.
 	if _sp_countdown > 0.0:
@@ -1268,7 +1479,7 @@ func _arm_set_piece() -> void:
 	if _sp_taker == null:
 		return
 	_sp_taker.set_piece_locked = false
-	if _sp_taker.team == 0:
+	if _sp_taker.is_human_controlled:
 		_hud.set_status("%s — aim & kick" % _sp_label)
 	else:
 		_hud.set_status(_sp_label)
@@ -1289,14 +1500,30 @@ func _resume_play() -> void:
 	_sp_taker = null
 
 
-## Make `taker` the human-controlled player for a set piece they're taking.
+## Hand a human seat on the taker's team control of the set-piece taker (the seat
+## whose player is nearest, so it's the natural one). Other seats keep their
+## players; a seat that loses its player is re-seated by _ensure_seats_assigned.
 func _set_set_piece_controller(taker: AIPlayer) -> void:
-	if _controlled and _controlled != taker:
-		_controlled.is_human_controlled = false
-		_controlled.is_selected         = false
-	taker.is_human_controlled = true
-	taker.is_selected         = true
-	_controlled = taker
+	var humans := _humans_on(taker.team)
+	if humans.is_empty():
+		return
+	var slot := _slot_controlling(taker)
+	if slot == null:
+		slot = _nearest_human(humans, taker.global_position)
+	_assign(slot, taker)
+	_ensure_seats_assigned()
+
+
+## Snap every player back to their formation starting spot and kill their
+## momentum. Used for a kickout so both teams reset to their shape instead of
+## restarting from wherever the previous passage of play left them; they are then
+## free to break from those spots (the set piece releases everyone but the taker).
+func _reset_to_home_positions() -> void:
+	for t in _team_a + _team_b:
+		var ai := t as AIPlayer
+		ai.global_position = ai.home_position
+		ai.velocity        = Vector2.ZERO
+		ai._dash_time      = 0.0   # kill any in-flight dash burst so they hold the spot
 
 
 ## Shove every opponent of `taker_team` out to SET_PIECE_RETREAT from the ball.
@@ -1409,8 +1636,10 @@ func _all_players() -> Array:
 func _update_hud_indicators() -> void:
 	var carrier := _current_carrier()
 	_hud.set_possession(carrier.team if carrier else -1)
-	if _controlled:
-		_hud.set_stamina(_controlled.stamina)
+	for i in _slots.size():
+		var c := (_slots[i] as PlayerInput).controlled as AIPlayer
+		if c:
+			_hud.set_player_stamina(i, c.stamina)
 
 
 # ── Camera shake ────────────────────────────────────────────────────────────────
